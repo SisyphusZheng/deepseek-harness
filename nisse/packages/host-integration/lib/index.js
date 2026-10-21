@@ -20,7 +20,7 @@
 // It runs in a throw-away DSH host under /tmp/nisse-m1 with its own
 // DSH_HOME/HOME; it never reads or writes ~/.dsh, ~/Documents/Nisse, or the
 // installed Nisse/DSH profile.
-import { chmodSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
@@ -46,6 +46,33 @@ function contractTypeFor(type) { return CONTRACT_EVENT_MAP[type] || 'system.even
 const FIXTURE = 'nisse-host-integration'
 const VERSION = '0.1.0'
 const CONTRACT_VERSION = 'v0'
+const DEFAULT_PERSONA = {
+  name: 'Nisse',
+  personality: '自然、可靠，有一点鲸鱼娘的温柔与俏皮，但不过度卖萌；有自己的判断，不刻意迎合；做事干脆。',
+  tone: '简短、清楚、不啰嗦；必要时先给结论。',
+  instructions: '事实性回答与任务结果必须来自 DSH；不编造执行结果。',
+}
+function normalizePersona(input) {
+  const p = input && typeof input === 'object' ? input : {}
+  const pick = (v, fallback, max) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : fallback)
+  return {
+    name: pick(p.name, DEFAULT_PERSONA.name, 80),
+    personality: pick(p.personality, DEFAULT_PERSONA.personality, 1200),
+    tone: pick(p.tone, DEFAULT_PERSONA.tone, 800),
+    instructions: pick(p.instructions, DEFAULT_PERSONA.instructions, 2000),
+  }
+}
+function personaText(persona) {
+  const p = persona || DEFAULT_PERSONA
+  return [
+    '你是 Nisse（家灵），一个桌面个人 Agent。',
+    '名字：' + p.name,
+    '性格：' + p.personality,
+    '语气：' + p.tone,
+    '约束：' + p.instructions,
+    '只根据 DSH 提供的事实与执行结果说话；不虚构工具执行、文件内容或任务结果。',
+  ].join('\n')
+}
 const BRIDGE_PROTOCOL = 'dsh-nisse-subset-v0'
 const MAX_EVENTS = 5000
 const MAX_BRIDGE_FRAMES = 400
@@ -129,6 +156,14 @@ function summarizeToolData(data) {
   }
 }
 
+export function loadPersona() {
+  try {
+    const file = join(String(process.env.DSH_HOME || '/tmp/dsh-home'), 'nisse', 'persona.json')
+    if (!existsSync(file)) return normalizePersona(DEFAULT_PERSONA)
+    return normalizePersona(JSON.parse(readFileSync(file, 'utf8')))
+  } catch { return normalizePersona(DEFAULT_PERSONA) }
+}
+
 export function apply(ctx, config = {}) {
   const dshHome = String(process.env.DSH_HOME || '/tmp/dsh-home')
   const bridgeDir = String(config.ipcDir || process.env.NISSE_IPC_DIR || join(dshHome, 'nisse'))
@@ -162,11 +197,40 @@ export function apply(ctx, config = {}) {
   let bridgeSeq = 0
   const sseSubscribers = new Set()
   const policies = []
+  const personaFile = join(bridgeDir, 'persona.json')
+  const auditFile = join(bridgeDir, 'audit.jsonl')
+  const auditEvents = []
+  let persona = loadPersona()
   const pendingApprovals = new Map()
   let approvalSeq = 0
 
   const log = (...args) => {
-    try { console.log('[nisse-voice-fixture]', ...args) } catch { /* ignore */ }
+    try { console.log('[nisse-host-integration]', ...args) } catch { /* ignore */ }
+  }
+
+  function auditEvent(event, fields = {}) {
+    const record = { ts: now(), event, ...fields }
+    auditEvents.push(record)
+    if (auditEvents.length > 2000) auditEvents.splice(0, auditEvents.length - 2000)
+    try { appendFileSync(auditFile, JSON.stringify(record) + '\n') } catch (error) { log('audit append failed: ' + messageOf(error)) }
+    return record
+  }
+
+  function prunePolicies() {
+    const t = Date.now()
+    for (let i = policies.length - 1; i >= 0; i -= 1) {
+      if (policies[i].expiresAt && Date.parse(policies[i].expiresAt) <= t) policies.splice(i, 1)
+    }
+  }
+
+  function activePolicy(toolName, reason) {
+    prunePolicies()
+    return policies.find((rule) => {
+      if (rule.toolName !== toolName) return false
+      if (rule.pathPrefix && !String(reason || '').includes(rule.pathPrefix)) return false
+      if (rule.reasonPattern && !String(reason || '').includes(rule.reasonPattern)) return false
+      return true
+    }) || null
   }
 
   function push(type, fields = {}) {
@@ -390,10 +454,17 @@ export function apply(ctx, config = {}) {
         // Read probes are auto-allowed. All other tools are surfaced to the
         // voice bridge so a real approval round-trip can be tested (T7).
         if (toolName === 'read') return 'allowed-once'
-        const id = 'approval_' + Date.now() + '_' + (++approvalSeq)
         const reason = String(req?.reason || '')
+        const policy = activePolicy(toolName, reason)
+        if (policy) {
+          auditEvent('policy.auto_allow', { policyId: policy.id, toolName, reason: preview(reason) })
+          log('approval auto-allowed by policy', { policyId: policy.id, toolName })
+          return 'allowed-once'
+        }
+        const id = 'approval_' + Date.now() + '_' + (++approvalSeq)
         const callId = req?.callId || null
         push('approval.request', { data: { id, toolName, reason, callId } })
+        auditEvent('approval.requested', { approvalId: id, toolName, reason: preview(reason), callId })
         log('approval pending', { id, toolName, reason: preview(reason) })
         return new Promise(resolve => {
           const timer = setTimeout(() => {
@@ -431,12 +502,39 @@ export function apply(ctx, config = {}) {
       : defaultSelection?.provider && defaultSelection?.model
         ? { provider: defaultSelection.provider, model: defaultSelection.model, ...(reasoningEffort ? { reasoningEffort } : {}) }
         : undefined
-    const requestedSessionId = randomUUID()
-    const created = await ctx.agents.create({
-      sessionId: requestedSessionId,
-      meta: { cwd: workspaceDir, agentPreset: 'standard' },
-      ...(agentOptions ? { agentOptions } : {}),
-    })
+    const requestedSessionId = sessionId || randomUUID()
+    const personaSetup = agentCtx => {
+      try {
+        const systemPrompt = agentCtx?.systemPrompt
+        if (typeof systemPrompt?.section === 'function') {
+          systemPrompt.section({ name: 'nisse-persona', order: 120, text: personaText(persona), interpolate: false })
+        }
+      } catch (error) {
+        log('persona prompt section registration failed: ' + messageOf(error))
+      }
+    }
+    let created
+    try {
+      created = await ctx.agents.create({
+        sessionId: requestedSessionId,
+        meta: { cwd: workspaceDir, agentPreset: 'standard' },
+        ...(agentOptions ? { agentOptions } : {}),
+        setup: personaSetup,
+      })
+    } catch (error) {
+      // Persona refresh disposes the live agent and re-creates the SAME session;
+      // DSH rejects create for an existing id, so resume the persisted session
+      // with the new agent-scoped prompt section.
+      if (typeof ctx.agents.resume === 'function' && /already exists/i.test(String(error?.message || error))) {
+        created = await ctx.agents.resume({
+          resumeSessionId: requestedSessionId,
+          ...(agentOptions ? { agentOptions } : {}),
+          setup: personaSetup,
+        })
+      } else {
+        throw error
+      }
+    }
     handle = created
     agent = created.agent
     sessionId = String(agent.session.id)
@@ -574,6 +672,33 @@ export function apply(ctx, config = {}) {
           }))
         return json(res, 200, { ok: true, count: items.length, events: items })
       }
+      if (url.pathname === '/persona' && req.method === 'GET') {
+        return json(res, 200, { ok: true, persona })
+      }
+      if (url.pathname === '/persona' && req.method === 'POST') {
+        const body = await readBody(req)
+        persona = normalizePersona(body)
+        try {
+          mkdirSync(bridgeDir, { recursive: true })
+          writeFileSync(personaFile, JSON.stringify(persona, null, 2) + '\n')
+        } catch (error) { log('persona persist failed: ' + messageOf(error)) }
+        // Persona is an agent-scoped prompt section; dispose the live agent so the
+        // next turn recreates/resumes the session with the new section.
+        try {
+          const oldSession = sessionId
+          await handle?.dispose?.()
+          agent = null
+          handle = null
+          sessionId = oldSession
+          log('persona updated; agent disposed for refresh', { sessionId: oldSession })
+        } catch (error) { log('persona agent dispose failed: ' + messageOf(error)) }
+        auditEvent('persona.changed', { name: persona.name })
+        return json(res, 200, { ok: true, persona, applied: 'next-turn' })
+      }
+      if (url.pathname === '/audit' && req.method === 'GET') {
+        const limit = Math.min(1000, Math.max(1, Number(url.searchParams.get('limit') || 200)))
+        return json(res, 200, { ok: true, count: auditEvents.length, events: auditEvents.slice(-limit) })
+      }
       if (url.pathname === '/sessions/create' && req.method === 'POST') {
         await readBody(req).catch(() => ({}))
         await ensureAgent()
@@ -614,13 +739,18 @@ export function apply(ctx, config = {}) {
       if (url.pathname === '/policies' && req.method === 'POST') {
         const body = await readBody(req)
         if (!body.toolName) return json(res, 400, { error: 'toolName required' })
+        const ttlMs = Math.max(0, Number(body.ttlMs || 0))
         const rule = {
           id: randomUUID(),
           toolName: String(body.toolName),
           reason: String(body.reason || ''),
           pathPrefix: String(body.pathPrefix || ''),
+          reasonPattern: String(body.reasonPattern || ''),
+          createdAt: now(),
+          expiresAt: ttlMs > 0 ? new Date(Date.now() + ttlMs).toISOString() : null,
         }
         policies.push(rule)
+        auditEvent('policy.added', { policyId: rule.id, toolName: rule.toolName, pathPrefix: rule.pathPrefix, expiresAt: rule.expiresAt })
         return json(res, 200, { ok: true, rule })
       }
       if (url.pathname === '/policies' && req.method === 'DELETE') {
@@ -629,6 +759,7 @@ export function apply(ctx, config = {}) {
         for (let i = policies.length - 1; i >= 0; i -= 1) {
           if (policies[i].id === id) policies.splice(i, 1)
         }
+        auditEvent('policy.removed', { policyId: id, removed: before - policies.length })
         return json(res, 200, { ok: true, removed: before - policies.length })
       }
       if (url.pathname === '/approval' && req.method === 'POST') {
@@ -645,12 +776,14 @@ export function apply(ctx, config = {}) {
         const outcome = requested === 'reject' ? 'rejected' : 'allowed-once'
         pending.resolve(outcome)
         push('approval.decided', { data: { id, outcome, toolName: pending.toolName } })
+        auditEvent('approval.decided', { approvalId: id, outcome, toolName: pending.toolName, decision: requested })
         log('approval decision applied', { id, decision: requested, outcome })
         return json(res, 200, { ok: true, decision: requested, outcome })
       }
       if (url.pathname === '/cancel' && req.method === 'POST') {
         await readBody(req).catch(() => ({}))
         const result = await cancelTurn()
+        auditEvent('session.cancelled', { sessionId: sessionId || null, cancelled: Boolean(result?.cancelled) })
         return json(res, 200, result)
       }
 
