@@ -1,0 +1,4 @@
+# Nisse Host Integration placeholder bundle patch (M2-3 smoke only).
+- insert:
+    - id: nisse-host-integration-placeholder
+      name: nisse-host-integration-placeholder

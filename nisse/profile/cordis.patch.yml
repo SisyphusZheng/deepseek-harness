@@ -1,0 +1,10 @@
+# Nisse profile user layer (M2-3 placeholder).
+# Route A / M2 freeze: no DSH core modifications; only profile-level configuration.
+# Real product policy (model route, approval defaults, tools) is decided in M3.
+- id: tool-fs
+  disabled: false
+  config:
+    read: true
+    readImage: false
+    write: false
+    edit: false
