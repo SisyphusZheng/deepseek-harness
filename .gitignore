@@ -50,3 +50,9 @@ native/system/test/bin/
 
 # Nisse distro build logs / artifacts (do not commit)
 .nisse/
+
+
+# Nisse first-party bundles live under nisse/packages/*/lib; the upstream root
+# `lib/` ignore rule would otherwise hide their implementation from git.
+!nisse/packages/*/lib/
+!nisse/packages/*/lib/**
