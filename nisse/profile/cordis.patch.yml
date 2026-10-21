@@ -1,10 +1,27 @@
-# Nisse profile user layer (M2-3 placeholder).
-# Route A / M2 freeze: no DSH core modifications; only profile-level configuration.
-# Real product policy (model route, approval defaults, tools) is decided in M3.
+# Nisse profile user layer (M3 Host Integration v0).
+# Placeholders are substituted by nisse/scripts/install-profile.sh.
+# Route A/M2 freeze: no DSH core modifications; profile-level composition only.
+- id: agent-default-model
+  name: '@deepseek-ai/dsh-agent-default-model'
+  config:
+    provider: opencode-go
+    model: deepseek-v4.1-flash
+    reasoningEffort: low
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      opencode-go:
+        apiKeyEnv: OPENCODE_GO_API_KEY
 - id: tool-fs
   disabled: false
   config:
     read: true
     readImage: false
-    write: false
+    write: __FS_WRITE__
     edit: false
+- id: nisse-host-integration
+  config:
+    ipcDir: __DSH_HOME__/nisse
+    workspaceDir: __DSH_HOME__/workspace
+    dshLlmEntry: __FORK__/packages/llm/llm/lib/index.js

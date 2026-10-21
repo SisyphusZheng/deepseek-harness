@@ -1,0 +1,4 @@
+# Nisse Host Integration v0 bundle patch (first-party; no core changes).
+- insert:
+    - id: nisse-host-integration
+      name: nisse-host-integration

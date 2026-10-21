@@ -1,0 +1,17 @@
+{
+  "name": "nisse-host-integration",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Nisse Host Integration v0 (M3): maps DSH turns/events/approvals/cancel to the internal Product Contract. First-party bundle; no DSH core changes.",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
