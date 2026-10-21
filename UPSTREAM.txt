@@ -12,8 +12,16 @@ clone_method: git clone --depth 1 --branch dsh-v0.2.1-rc.2 <upstream>
 node_version: v24.18.0 (local); engines ^22.19.0 || >=24.0.0
 pnpm_version: 11.28.5 (packageManager; local pnpm 12.3.4 via npx/corepack expected)
 build_os: macOS 26.5.1 arm64
-build_command: pnpm install --frozen-lockfile ; pnpm build
-build_output_sha256: TBD (M2-2 baseline)
+build_command: cd <fork> && pnpm install --frozen-lockfile && pnpm run typecheck && pnpm run build && pnpm run build:check
+build_output_sha256:
+  native_system_node: 596c22244338a11a4a26dc43308622ba623525aefe6a442d46f30ecd8bd1aa19
+  client_build_environment: b6ed89ec64b58e46ae098842fb600dc96273bef7d9324ca230aa971a272ef769
+  web_dist_index: 94bb1abd888bfa2b5cb77a3f396c174df2c482d1aaf3b3f657abc0e8c9e64d41
+build_timing:
+  install: 24.1s (pnpm 11.28.5; registry mirror workaround, not committed)
+  typecheck: 97.92s (5/5 gates)
+  build: 27.03s (9/9 gates)
+  build_check: 7.95s (2/2 gates)
 notes: |
   - Fork workspace lives at /Users/zhengzhi/Documents/projects/nisse-dsh (separate from the Nisse project git tree).
   - Route A constraint: no DSH core changes in M1/M2; any future core patch needs user approval + ADR-0005 patch queue.
