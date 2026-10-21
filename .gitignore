@@ -47,3 +47,6 @@ worktrees/
 .agents/worktrees/
 .typert-*/
 native/system/test/bin/
+
+# Nisse distro build logs / artifacts (do not commit)
+.nisse/

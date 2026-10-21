@@ -1,0 +1,20 @@
+# UPSTREAM.txt — DSH upstream pin (M2)
+# Updated: 2026-10-21 (M2 kickoff)
+
+upstream_repo_url: https://github.com/deepseek-ai/deepseek-harness
+fork_repo_url: https://github.com/SisyphusZheng/deepseek-harness
+upstream_tag: dsh-v0.2.1-rc.2
+upstream_commit: 687f282e8625c6b8d11ff58211a90524be2e4317
+upstream_default_branch: master
+license: MIT
+fetched_at: 2026-10-21
+clone_method: git clone --depth 1 --branch dsh-v0.2.1-rc.2 <upstream>
+node_version: v24.18.0 (local); engines ^22.19.0 || >=24.0.0
+pnpm_version: 11.28.5 (packageManager; local pnpm 12.3.4 via npx/corepack expected)
+build_os: macOS 26.5.1 arm64
+build_command: pnpm install --frozen-lockfile ; pnpm build
+build_output_sha256: TBD (M2-2 baseline)
+notes: |
+  - Fork workspace lives at /Users/zhengzhi/Documents/projects/nisse-dsh (separate from the Nisse project git tree).
+  - Route A constraint: no DSH core changes in M1/M2; any future core patch needs user approval + ADR-0005 patch queue.
+  - Shallow clone at tag; upstream full refs can be fetched later (M2-5 sync drill).
