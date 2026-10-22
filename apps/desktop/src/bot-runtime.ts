@@ -79,10 +79,11 @@ export class BotRuntime {
     try {
       this.child = spawn(node, ['cli/bin/qwenaudio.mjs', 'gateway'], {
         cwd: this.voiceDir,
-        env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_DATA_HOME: join(home, '.local/share'), XDG_STATE_HOME: join(home, '.local/state'), PORT: String(this.port), AGENT_PROTOCOL: 'none', NISSE_ROUTE_C: '1', NISSE_BRIDGE_ONLY: '1', NISSE_BRIDGE_FILE: bridge },
+        env: { ...process.env, DSH_DESKTOP_NODE_EXECUTABLE: process.execPath, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_DATA_HOME: join(home, '.local/share'), XDG_STATE_HOME: join(home, '.local/state'), PORT: String(this.port), AGENT_PROTOCOL: 'none', NISSE_ROUTE_C: '1', NISSE_BRIDGE_ONLY: '1', NISSE_BRIDGE_FILE: bridge },
         stdio: ['ignore', 'pipe', 'pipe'],
       })
-      this.child.once('exit', () => { this.child = null })
+      this.child.once('exit', (code) => { this.lastError = 'gateway exited ' + String(code ?? ''); this.child = null })
+      this.child.stderr?.on('data', (chunk) => { this.lastError = String(chunk).trim().slice(-500) })
       this.child.on('error', (error) => { this.lastError = String(error?.message || error) })
     } catch (error) { this.lastError = String((error as Error)?.message || error) }
     return this.status()
