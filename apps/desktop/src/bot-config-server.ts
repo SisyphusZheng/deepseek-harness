@@ -18,7 +18,16 @@ export interface BotConfig {
   voice: { provider: string; baseUrl: string; apiKey: string; model: string; voice: string; wakeWord: string }
   llm: { provider: string; model: string; baseUrl: string; apiKey: string }
   agent: { mode: 'chat-only' | 'dsh'; workspace: string; session: string }
-  persona: { name: string; personality: string; tone: string; instructions: string }
+  persona: {
+    name: string
+    personality: string
+    tone: string
+    background: string
+    quirks: string
+    addressUser: string
+    boundaries: string
+    instructions: string
+  }
   app: { autoStart: boolean; keepRunning: boolean }
 }
 
@@ -32,7 +41,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   voice: { provider: 'dashscope', baseUrl: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime', apiKey: '', model: 'qwen-audio-3.0-realtime-plus', voice: 'longanxiaoxin', wakeWord: '' },
   llm: { provider: 'opencode-go', model: 'deepseek-v4.1-flash', baseUrl: '', apiKey: '' },
   agent: { mode: 'dsh', workspace: '', session: '' },
-  persona: { name: 'Nisse（家灵）', personality: '自然、可靠，有一点鲸鱼娘的温柔与俏皮，但不过度卖萌；有自己的判断，不刻意迎合；做事干脆。', tone: '简短、清楚、不啰嗦；必要时先给结论。', instructions: '事实与执行结果必须来自 DSH；不编造执行结果。' },
+  persona: { name: 'Nisse（家灵）', personality: '自然、可靠，有一点鲸鱼娘的温柔与俏皮，但不过度卖萌；有自己的判断，不刻意迎合；做事干脆。', tone: '简短、清楚、不啰嗦；必要时先给结论。', background: '', quirks: '', addressUser: '', boundaries: '', instructions: '事实与执行结果必须来自 DSH；不编造执行结果。' },
   app: { autoStart: true, keepRunning: true },
 }
 
@@ -75,6 +84,10 @@ function normalize(input: unknown): BotConfig {
       name: clampText(persona.name, DEFAULT_BOT_CONFIG.persona.name),
       personality: clampText(persona.personality, DEFAULT_BOT_CONFIG.persona.personality),
       tone: clampText(persona.tone, DEFAULT_BOT_CONFIG.persona.tone),
+      background: clampText(persona.background),
+      quirks: clampText(persona.quirks),
+      addressUser: clampText(persona.addressUser),
+      boundaries: clampText(persona.boundaries),
       instructions: clampText(persona.instructions, DEFAULT_BOT_CONFIG.persona.instructions),
     },
     app: {
@@ -215,6 +228,10 @@ var schema = [
     {key:'name', label:'称呼', type:'text'},
     {key:'personality', label:'性格', type:'textarea'},
     {key:'tone', label:'语气', type:'textarea'},
+    {key:'background', label:'身份/背景', type:'textarea'},
+    {key:'quirks', label:'说话风格/口癖', type:'text'},
+    {key:'addressUser', label:'对用户的称呼', type:'text'},
+    {key:'boundaries', label:'边界/禁忌', type:'textarea'},
     {key:'instructions', label:'人格说明', type:'textarea'}
   ]},
   {id:'app', label:'应用程序', fields:[

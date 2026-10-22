@@ -352,10 +352,16 @@ async function main(): Promise<void> {
         || previous.llm?.model !== config.llm.model
         || previous.llm?.baseUrl !== config.llm.baseUrl
         || String(previous.agent?.workspace || '') !== String(config.agent.workspace || '')
-        || previous.persona?.name !== config.persona.name
-        || previous.persona?.personality !== config.persona.personality
-        || previous.persona?.tone !== config.persona.tone
-        || previous.persona?.instructions !== config.persona.instructions
+        || JSON.stringify(previous.persona || {}) !== JSON.stringify({
+          name: config.persona.name,
+          personality: config.persona.personality,
+          tone: config.persona.tone,
+          background: config.persona.background,
+          quirks: config.persona.quirks,
+          addressUser: config.persona.addressUser,
+          boundaries: config.persona.boundaries,
+          instructions: config.persona.instructions,
+        })
       void botRuntime.applyConfig(config).then(() => {
         if (!hostRestart || process.env.WHALEGIRL_NO_RELAUNCH === '1') return
         setTimeout(() => { app.relaunch(); app.quit() }, 800)

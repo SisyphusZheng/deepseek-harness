@@ -52,6 +52,10 @@ const DEFAULT_PERSONA = {
   name: 'Nisse（家灵）',
   personality: '自然、可靠，有一点鲸鱼娘的温柔与俏皮，但不过度卖萌；有自己的判断，不刻意迎合；做事干脆。',
   tone: '简短、清楚、不啰嗦；必要时先给结论。',
+  background: '',
+  quirks: '',
+  addressUser: '',
+  boundaries: '',
   instructions: '事实与执行结果必须来自 DSH；不编造执行结果。',
 }
 function normalizePersona(input) {
@@ -61,19 +65,28 @@ function normalizePersona(input) {
     name: pick(p.name, DEFAULT_PERSONA.name, 80),
     personality: pick(p.personality, DEFAULT_PERSONA.personality, 1200),
     tone: pick(p.tone, DEFAULT_PERSONA.tone, 800),
+    background: pick(p.background, DEFAULT_PERSONA.background, 2000),
+    quirks: pick(p.quirks, DEFAULT_PERSONA.quirks, 800),
+    addressUser: pick(p.addressUser, DEFAULT_PERSONA.addressUser, 120),
+    boundaries: pick(p.boundaries, DEFAULT_PERSONA.boundaries, 1200),
     instructions: pick(p.instructions, DEFAULT_PERSONA.instructions, 2000),
   }
 }
 function personaText(persona) {
   const p = persona || DEFAULT_PERSONA
-  return [
+  const lines = [
     '你是 Nisse（家灵），一个桌面个人 Agent。',
     '名字：' + p.name,
     '性格：' + p.personality,
     '语气：' + p.tone,
-    '约束：' + p.instructions,
-    '只根据 DSH 提供的事实与执行结果说话；不虚构工具执行、文件内容或任务结果。',
-  ].join('\n')
+  ]
+  if (p.background) lines.push('身份/背景：' + p.background)
+  if (p.quirks) lines.push('说话风格/口癖：' + p.quirks)
+  if (p.addressUser) lines.push('对用户的称呼：' + p.addressUser)
+  if (p.boundaries) lines.push('边界/禁忌：' + p.boundaries)
+  lines.push('约束：' + p.instructions)
+  lines.push('只根据 DSH 提供的事实与执行结果说话；不虚构工具执行、文件内容或任务结果。')
+  return lines.join('\n')
 }
 const BRIDGE_PROTOCOL = 'dsh-nisse-subset-v0'
 const MAX_EVENTS = 5000
@@ -674,6 +687,24 @@ export function apply(ctx, config = {}) {
     }
   }
 
+  /** Give the fixed Bot conversation its stable title (user titles survive automatic naming). */
+  function titleBotSession(session) {
+    try {
+      const titles = ctx.get?.('sessionTitle')
+      if (titles && typeof titles.rename === 'function') {
+        titles.rename(session, 'Bot 对话')
+        return true
+      }
+    } catch { /* fall through to a direct durable append */ }
+    try {
+      session.append('session/title', { title: 'Bot 对话', messageSeqs: [], source: { kind: 'user' } })
+      return true
+    } catch (error) {
+      log('bot session title failed: ' + messageOf(error))
+      return false
+    }
+  }
+
   /** Attach the persisted Bot conversation to its workspace at startup so it is
    *  already listed under the Bot workspace before the first voice turn. */
   async function attachPersistedSession() {
@@ -717,6 +748,7 @@ export function apply(ctx, config = {}) {
       }
     }
     let created
+    let resumed = false
     try {
       created = await ctx.agents.create({
         sessionId: requestedSessionId,
@@ -729,6 +761,7 @@ export function apply(ctx, config = {}) {
       // DSH rejects create for an existing id, so resume the persisted session
       // with the new agent-scoped prompt section.
       if (typeof ctx.agents.resume === 'function' && /already exists/i.test(String(error?.message || error))) {
+        resumed = true
         created = await ctx.agents.resume({
           resumeSessionId: requestedSessionId,
           ...(agentOptions ? { agentOptions } : {}),
@@ -742,6 +775,7 @@ export function apply(ctx, config = {}) {
     agent = created.agent
     sessionId = String(agent.session.id)
     persistBotSession(sessionId, canonicalWorkspaceDir())
+    if (!resumed) titleBotSession(agent.session)
     // Membership: a session created directly through the Agent factory is not
     // attached to the Workspace record by the Workspace controller, so attach it
     // here; without this the Bot conversation would surface under the ungrouped
@@ -1087,7 +1121,21 @@ export function apply(ctx, config = {}) {
   })
 
   ctx.inject(['workspaceRegistry'], () => {
-    void ensureBotWorkspace().then(() => attachPersistedSession())
+    void (async () => {
+      await ensureBotWorkspace()
+      await attachPersistedSession()
+      // The fixed Bot conversation exists from launch (not only after the first
+      // voice turn) so the desktop always shows it in its own workspace.
+      try {
+        const hadPersisted = persistedSessionId() !== ''
+        await ensureAgent()
+        if (!hadPersisted) titleBotSession(agent.session)
+        const registry = ctx.get?.('workspaceRegistry')
+        if (registry && typeof registry.pinSession === 'function') await registry.pinSession(sessionId)
+      } catch (error) {
+        log('bot conversation startup failed: ' + messageOf(error))
+      }
+    })()
   })
 
   ctx.effect?.(() => () => {

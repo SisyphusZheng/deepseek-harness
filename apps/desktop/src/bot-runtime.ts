@@ -17,7 +17,16 @@ export interface BotRuntimeConfig {
   voice?: { provider?: string; baseUrl?: string; apiKey?: string; model?: string; voice?: string; wakeWord?: string }
   llm?: { provider?: string; model?: string; baseUrl?: string; apiKey?: string }
   agent?: { mode?: string; workspace?: string; session?: string }
-  persona?: { name?: string; personality?: string; tone?: string; instructions?: string }
+  persona?: {
+    name?: string
+    personality?: string
+    tone?: string
+    background?: string
+    quirks?: string
+    addressUser?: string
+    boundaries?: string
+    instructions?: string
+  }
 }
 
 /** Environment variable names each supported LLM provider route reads its key from. */
