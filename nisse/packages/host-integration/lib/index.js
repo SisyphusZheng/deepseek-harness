@@ -212,27 +212,30 @@ export function apply(ctx, config = {}) {
   function installWriteApprovalPolicy() {
     if (typeof ctx.on !== 'function') return
     const root = resolve(workspaceDir)
-    const mutating = /(?:^|[;&|]\s*)(?:touch|mkdir|rm|cp|mv|tee|dd|printf|echo|cat\s*>|sed\s+-i|perl\s+-pi|python3?\s+-c)/i
+    const home = process.env.HOME || ''
+    const mutating = /(?:^|[;&|]\s*)(?:touch|mkdir|rm|rmdir|cp|mv|tee|dd|truncate|ln|chmod|chown|printf|echo|cat\s*>|sed\s+-i|perl\s+-pi|python3?\s+-c)/i
+    const writeTools = new Set(['write', 'edit', 'apply_patch', 'multi_edit', 'write_file'])
     ctx.on('tools/pre-execute', async (exec, next) => {
       try {
         const name = String(exec?.name || '')
         const args = exec?.arguments && typeof exec.arguments === 'object' ? exec.arguments : {}
-        const isWrite = name === 'write'
+        const isWrite = writeTools.has(name)
         const isShell = /terminal|bash|shell|exec/i.test(name)
         if (!isWrite && !isShell) return next()
         let target = ''
-        if (isWrite) target = String(args.path || args.file_path || args.filePath || '')
+        if (isWrite) target = String(args.path || args.file_path || args.filePath || args.target || '')
         else {
           const command = String(args.command || args.cmd || args.input || args.text || '')
-          const match = command.match(/\/Users\/[^\s'"`;|&]+|\/var\/[^\s'"`;|&]+|\/etc\/[^\s'"`;|&]+/g) || []
+          const match = command.match(/~\/[^\s'"`;|&]+|\/Users\/[^\s'"`;|&]+|\/var\/[^\s'"`;|&]+|\/etc\/[^\s'"`;|&]+/g) || []
           if (!mutating.test(command) || match.length === 0) return next()
           target = match.find((candidate) => {
-            const relCandidate = relative(root, resolve(candidate))
+            const absolute = candidate.startsWith('~/') && home ? join(home, candidate.slice(2)) : resolve(candidate)
+            const relCandidate = relative(root, absolute)
             return relCandidate.startsWith('..') || relCandidate.startsWith('/') || relCandidate.includes(':')
           }) || ''
         }
         if (!target) return next()
-        const absolute = resolve(target)
+        const absolute = target.startsWith('~/') && home ? join(home, target.slice(2)) : resolve(target)
         const rel = relative(root, absolute)
         if (!rel.startsWith('..') && !rel.startsWith('/') && !rel.includes(':')) return next()
         log('approval preflight ask', { tool: name, target: absolute })
@@ -549,7 +552,12 @@ export function apply(ctx, config = {}) {
         return next()
       }
     }
-    ctx.on('approval/request', approvalAnswerer)
+    // The desktop UI's own answerer (api-remotes -> ui-approval) is registered by an
+    // earlier bundle and would otherwise own the waterfall first, leaving the pet with
+    // no approval to show while the human looks at the pet, not the DSH window. For the
+    // Bot session the pet IS the approval surface, so run ahead of that forwarder. Any
+    // request outside our session is delegated untouched (fail-closed semantics kept).
+    ctx.on('approval/request', approvalAnswerer, { prepend: true })
   } else {
     log('ctx.on unavailable; durable events will only be backfilled on idle')
   }
@@ -577,11 +585,6 @@ export function apply(ctx, config = {}) {
     const digest = await memoryDigest()
     const personaSetup = agentCtx => {
       try {
-        log('agent setup callback', { hasOn: typeof agentCtx?.on, hasAnswerer: Boolean(approvalAnswerer) })
-        if (typeof agentCtx?.on === 'function' && approvalAnswerer) {
-          agentCtx.on('approval/request', approvalAnswerer)
-          log('approval answerer registered in setup')
-        }
         const systemPrompt = agentCtx?.systemPrompt
         if (typeof systemPrompt?.section === 'function') {
           systemPrompt.section({ name: 'nisse-persona', order: 120, text: personaText(persona), interpolate: false })
@@ -617,13 +620,6 @@ export function apply(ctx, config = {}) {
     handle = created
     agent = created.agent
     sessionId = String(agent.session.id)
-    log('agent inspect', { hasCtx: Boolean(agent.ctx), ctxOn: typeof agent.ctx?.on, keys: Object.keys(agent).slice(0, 12) })
-    try {
-      if (agent.ctx && typeof agent.ctx.on === 'function' && approvalAnswerer) {
-        agent.ctx.on('approval/request', approvalAnswerer)
-        log('approval answerer registered on agent.ctx')
-      }
-    } catch (error) { log('agent.ctx answerer registration failed: ' + messageOf(error)) }
 
     try {
       const presets = ctx.permissionPresets || ctx.get?.('permissionPresets')
