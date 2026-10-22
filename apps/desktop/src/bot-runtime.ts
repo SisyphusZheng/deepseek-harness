@@ -39,8 +39,13 @@ export class BotRuntime {
     writeFileSync(join(profile, 'package.json'), JSON.stringify(manifest, null, 2) + '\n')
     const llm = join(this.resourcesPath, 'app.asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh-llm', 'lib', 'index.js')
     process.env.NISSE_DSH_LLM_ENTRY = llm
-    const patch = `- id: nisse-host-integration\n  name: 'nisse-host-integration'\n  config:\n    provider: opencode-go\n    model: deepseek-v4.1-flash\n    reasoningEffort: low\n    ipcDir: ${join(this.dshHome, 'nisse')}\n    workspaceDir: ${join(this.dshHome, 'workspace')}\n    dshLlmEntry: ${llm}\n`
-    writeFileSync(join(profile, 'cordis.patch.yml'), patch)
+    const patchFile = join(profile, 'cordis.patch.yml')
+    let existingPatch = ''
+    try { existingPatch = readFileSync(patchFile, 'utf8') } catch {}
+    if (!existingPatch.includes('nisse-host-integration')) {
+      const entry = `- id: nisse-host-integration\n  name: 'nisse-host-integration'\n  config:\n    ipcDir: ${join(this.dshHome, 'nisse')}\n    workspaceDir: ${join(this.dshHome, 'workspace')}\n    dshLlmEntry: ${llm}\n`
+      writeFileSync(patchFile, existingPatch + (existingPatch.endsWith('\n') || !existingPatch ? '' : '\n') + entry)
+    }
   }
 
   private bridgeFile(): string { return join(this.dshHome, 'bot', 'bridge.json') }

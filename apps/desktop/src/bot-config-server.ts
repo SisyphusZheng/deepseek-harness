@@ -128,6 +128,9 @@ export interface BotConfigHooks {
   status?: () => unknown
   onConfigSaved?: (config: BotConfig) => void | Promise<void>
   onRestart?: () => unknown | Promise<unknown>
+  onToggleMain?: () => unknown | Promise<unknown>
+  onOpenSettings?: () => unknown | Promise<unknown>
+  onApproval?: (id: string, decision: string) => unknown | Promise<unknown>
 }
 
 export async function startBotConfigServer(
@@ -147,6 +150,18 @@ export async function startBotConfigServer(
       }
       if (url.pathname === '/bot/restart' && req.method === 'POST') {
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: true, status: await hooks.onRestart?.() ?? null })); return
+      }
+      if (url.pathname === '/bot/open-settings' && req.method === 'POST') {
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: true, result: await hooks.onOpenSettings?.() ?? null })); return
+      }
+      if (url.pathname === '/bot/approval' && req.method === 'POST') {
+        const body = JSON.parse(await new Promise<string>((resolve) => { const chunks: Buffer[] = []; req.on('data', c => chunks.push(Buffer.from(c))); req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8') || '{}')) }))
+        const result = await hooks.onApproval?.(String(body.id || ''), String(body.decision || '')) ?? null
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: true, result })); return
+      }
+      if (url.pathname === '/bot/toggle-main' && req.method === 'POST') {
+        const result = await hooks.onToggleMain?.() ?? null
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: true, result })); return
       }
       if (url.pathname === '/bot/config' && req.method === 'GET') {
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: true, config: await readConfig(configDir) })); return

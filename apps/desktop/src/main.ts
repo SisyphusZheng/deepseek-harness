@@ -3,11 +3,12 @@ import { WINDOWS_TITLEBAR_HEIGHT } from './windows-layout.ts'
 /** Electron shell: desktop project ownership, custom protocol, windows, and lifecycle. */
 
 import { readFile, writeFile } from 'node:fs/promises'
+import { rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { startBotConfigServer } from './bot-config-server.ts'
+import { spawn } from 'node:child_process'
 import { BotRuntime } from './bot-runtime.ts'
-import { createPetWindow } from './pet-window.ts'
 import { fileURLToPath } from 'node:url'
 import {
   app,
@@ -337,12 +338,59 @@ async function main(): Promise<void> {
     status: () => botRuntime.status(),
     onConfigSaved: () => { void botRuntime.restart() },
     onRestart: () => botRuntime.restart(),
+    onToggleMain: () => {
+      const window = mainWindow ?? createMainWindow()
+      if (window.isVisible() && window.isFocused()) { window.minimize(); return 'minimized' }
+      window.show(); window.focus(); return 'shown'
+    },
+    onOpenSettings: async () => {
+      const window = mainWindow ?? createMainWindow()
+      window.show(); window.focus()
+      await window.webContents.executeJavaScript('(()=>{const b=[...document.querySelectorAll(\'button\')].find(x=>x.textContent.trim()===\'设置\'); if(b)b.click(); setTimeout(()=>{const els=[...document.querySelectorAll(\'button,a,div\')].filter(x=>x.textContent.trim()===\'Bot\'); const e=els[els.length-1]; if(e)e.click()},400); return true})()').catch(() => undefined)
+      return 'settings-opened'
+    },
+    onApproval: async (id: string, decision: string) => {
+      const bridgeFile = join(resolveDshHome(), 'bot', 'bridge.json')
+      const bridge = JSON.parse(await readFile(bridgeFile, 'utf8')) as { port: number; token: string }
+      const response = await net.fetch(`http://127.0.0.1:${bridge.port}/approval`, { method: 'POST', headers: { authorization: `Bearer ${bridge.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ id, decision }) })
+      return await response.json().catch(() => null)
+    },
   }).catch((error: unknown) => {
     console.warn('bot config server:', error)
     return undefined
   })
   app.on('will-quit', () => { void botRuntime.stop(); void botConfigServer?.close() })
-  void botRuntime.start()
+  const petApp = process.env.WHALEGIRL_PET_APP || '/Users/zhengzhi/Documents/projects/nisse/m3/pet/desktop'
+  const petElectron = process.env.WHALEGIRL_PET_ELECTRON || '/Users/zhengzhi/Documents/projects/nisse/research/qwen-audio-agent/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'
+  const voiceHome = process.env.WHALEGIRL_VOICE_HOME || '/tmp/nisse-m1/voice'
+  const petUserData = process.env.WHALEGIRL_PET_USER_DATA || '/tmp/nisse-pet2/userdata'
+  let petProcess: ReturnType<typeof spawn> | null = null
+  const startDeskPet = (): void => {
+    if (petProcess) return
+    for (const name of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
+      try { rmSync(join(petUserData, name), { force: true }) } catch {}
+    }
+    try {
+      petProcess = spawn(petElectron, [petApp, `--user-data-dir=${petUserData}`], {
+        env: {
+          ...process.env,
+          HOME: process.env.WHALEGIRL_PET_HOME || '/tmp/nisse-m1/home',
+          XDG_CONFIG_HOME: `${voiceHome}/config`,
+          XDG_DATA_HOME: `${voiceHome}/data`,
+          XDG_STATE_HOME: `${voiceHome}/state`,
+          QWEN_AUDIO_AGENT_URL: 'http://127.0.0.1:59002',
+          AGENT_PROTOCOL: 'none',
+          NISSE_BRIDGE_ONLY: '1',
+          NISSE_BRIDGE_FILE: join(resolveDshHome(), 'bot', 'bridge.json'),
+        },
+        cwd: process.env.WHALEGIRL_PET_CWD || '/Users/zhengzhi/Documents/projects/nisse',
+        stdio: ['ignore', 'ignore', 'ignore'],
+      })
+      petProcess.once('exit', () => { petProcess = null })
+      app.on('will-quit', () => { try { petProcess?.kill('SIGTERM') } catch {} })
+    } catch (error) { console.warn('deskpet spawn:', error) }
+  }
+  void botRuntime.start().then((status) => { if (status.gateway) startDeskPet() })
   // Dock and Finder launches inherit only launchd's environment; every Host shares one login-shell read.
   const loginShellRead = new AbortController()
   // The probe runs in its own process group, which outlives Desktop unless the read is aborted.
@@ -359,17 +407,10 @@ async function main(): Promise<void> {
   let startup: Promise<void> | undefined
   let workspaceRecovery: Promise<void> | undefined
   let mainWindow: BrowserWindow | undefined
-  let petWindow: BrowserWindow | undefined
   let welcomeWindow: BrowserWindow | undefined
   let enteredWorkspace = false
-  app.whenReady().then(() => {
-    petWindow = createPetWindow({ resources: process.resourcesPath, onOpenMain: () => {
-      const window = mainWindow ?? createMainWindow()
-      if (window.isVisible() && window.isFocused()) { window.minimize(); return }
-      window.show(); window.focus()
-    } })
-    app.on('will-quit', () => { try { petWindow?.destroy() } catch {} })
-  }).catch(() => undefined)
+  // The companion effect is provided by the vlln/whale-girl DSH client bundle in the
+  // desktop profile; the shell no longer creates a hand-rolled pet window.
   // NSIS passes --updated when it launches the application after installation.
   let raiseAfterUpdate = process.platform === 'win32' && process.argv.includes('--updated')
   let shellInstallerOwnsQuit = false

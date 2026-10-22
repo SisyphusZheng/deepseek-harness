@@ -23,11 +23,11 @@
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 export const name = 'nisse-host-integration'
-export const inject = ['agents']
+export const inject = ['agents', 'permissionPresets']
 
 const CONTRACT_EVENT_MAP = {
   'user.message': 'turn.started',
@@ -171,6 +171,7 @@ export function apply(ctx, config = {}) {
   const provider = String(config.provider || process.env.NISSE_M1_PROVIDER || '').trim()
   const model = String(config.model || process.env.NISSE_M1_MODEL || '').trim()
   const reasoningEffort = String(config.reasoningEffort || process.env.NISSE_M1_REASONING_EFFORT || '').trim()
+  const permissionPreset = String(config.permissionPreset || process.env.NISSE_PERMISSION_PRESET || 'workspace-write')
   const memoryUrl = String(config.memoryUrl || process.env.NISSE_MEMORY_URL || '').replace(/\/$/, '')
   const memoryToken = String(config.memoryToken || process.env.NISSE_MEMORY_TOKEN || '')
   const hostPid = process.pid
@@ -205,6 +206,27 @@ export function apply(ctx, config = {}) {
   let persona = loadPersona()
   const pendingApprovals = new Map()
   let approvalSeq = 0
+
+  function installWriteApprovalPolicy() {
+    if (typeof ctx.on !== 'function') return
+    const root = resolve(workspaceDir)
+    ctx.on('tools/pre-execute', async (exec, next) => {
+      try {
+        if (exec?.name !== 'write') return next()
+        const args = exec?.arguments && typeof exec.arguments === 'object' ? exec.arguments : {}
+        const target = String(args.path || args.file_path || args.filePath || '')
+        if (!target) return next()
+        const absolute = resolve(target)
+        const rel = relative(root, absolute)
+        if (!rel.startsWith('..') && !rel.startsWith('/') && !rel.includes(':')) return next()
+        return { kind: 'ask', reason: `write outside workspace: ${absolute}`, displayReason: { en: `Write outside workspace: ${absolute}`, zh: `写入工作区外文件：${absolute}` } }
+      } catch (error) {
+        log('write approval policy failed: ' + messageOf(error))
+        return next()
+      }
+    })
+    log('write approval policy installed')
+  }
 
   const log = (...args) => {
     try { console.log('[nisse-host-integration]', ...args) } catch { /* ignore */ }
@@ -568,6 +590,11 @@ export function apply(ctx, config = {}) {
     handle = created
     agent = created.agent
     sessionId = String(agent.session.id)
+    try {
+      const presets = ctx.permissionPresets || ctx.get?.('permissionPresets')
+      if (presets && typeof presets.set === 'function') { presets.set(agent.session, permissionPreset); log('permission preset applied', { preset: permissionPreset }) }
+      else log('permissionPresets service unavailable')
+    } catch (error) { log('permission preset apply failed: ' + messageOf(error)) }
     push('agent.created', {
       sessionId,
       data: {
@@ -671,6 +698,8 @@ export function apply(ctx, config = {}) {
       },
     }
   }
+
+  installWriteApprovalPolicy()
 
   const server = createServer(async (req, res) => {
     try {
