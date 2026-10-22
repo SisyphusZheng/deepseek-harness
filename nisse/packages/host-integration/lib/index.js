@@ -617,6 +617,13 @@ export function apply(ctx, config = {}) {
     handle = created
     agent = created.agent
     sessionId = String(agent.session.id)
+    log('agent inspect', { hasCtx: Boolean(agent.ctx), ctxOn: typeof agent.ctx?.on, keys: Object.keys(agent).slice(0, 12) })
+    try {
+      if (agent.ctx && typeof agent.ctx.on === 'function' && approvalAnswerer) {
+        agent.ctx.on('approval/request', approvalAnswerer)
+        log('approval answerer registered on agent.ctx')
+      }
+    } catch (error) { log('agent.ctx answerer registration failed: ' + messageOf(error)) }
 
     try {
       const presets = ctx.permissionPresets || ctx.get?.('permissionPresets')
