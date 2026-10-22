@@ -9,6 +9,7 @@ import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { BOT_CONFIG_PORT, startBotConfigServer } from './bot-config-server.ts'
 import { spawn } from 'node:child_process'
 import { BotRuntime, type BotRuntimeConfig } from './bot-runtime.ts'
+import { MemoryRuntime } from './memory-runtime.ts'
 import { fileURLToPath } from 'node:url'
 import {
   app,
@@ -338,17 +339,45 @@ async function main(): Promise<void> {
     const repositoryRoot = join(app.getAppPath(), '..', '..')
     process.env.WHALEGIRL_HOST_INTEGRATION_DIR ||= join(repositoryRoot, 'nisse', 'packages', 'host-integration')
     process.env.WHALEGIRL_LLM_ENTRY_PATH ||= join(repositoryRoot, 'packages', 'llm', 'llm', 'lib', 'index.js')
+    // The Body Runtime, the Hindsight spike and the memory sidecar live in the
+    // product project beside the fork during development.
+    process.env.WHALEGIRL_PROJECT_ROOT ||= join(repositoryRoot, '..', 'nisse')
   }
   const botRuntime = new BotRuntime(resolveDshHome(), process.resourcesPath)
-  botRuntime.prepare()
+  // Built-in long-term memory: start the local Hindsight server + adapter sidecar
+  // before the Host profile is composed, then publish its loopback endpoints into
+  // the managed profile layer. Fail-soft: the Bot runs without memory on failure.
+  const memoryRuntime = new MemoryRuntime(resolveDshHome(), process.resourcesPath, app.getAppPath(), development)
+  const startupConfig = botRuntime.readConfig()
+  await memoryRuntime.start(startupConfig)
+  memoryRuntime.publishDescriptor()
+  botRuntime.setMemory(memoryRuntime.url !== null && memoryRuntime.token !== null
+    ? { url: memoryRuntime.url, token: memoryRuntime.token }
+    : null)
+  botRuntime.prepare(startupConfig)
   const botConfigServer = await startBotConfigServer(resolveDshHome(), undefined, {
     status: () => botRuntime.status(),
+    onMemoryStatus: () => memoryRuntime.status(),
+    onMemorySearch: async (query: string) => {
+      const response = await memoryRuntime.request('/search', { query, namespaces: ['global'], limit: 8, budgetTokens: 1200 })
+      return response.json
+    },
+    onMemoryExport: async () => {
+      const response = await memoryRuntime.request('/export', { format: 'jsonl', limit: 1000 })
+      return response.json
+    },
+    onMemoryForget: async () => {
+      const response = await memoryRuntime.request('/forget', { filter: {}, opts: { confirm: true } })
+      return response.json
+    },
     onConfigSaved: (config) => {
       const previous = botRuntime.readConfig()
       // The LLM route and the Bot workspace are composed into the DSH profile at
       // Host start, so a change to either needs one Host restart. Voice-only edits
       // just restart the gateway. Relaunch once instead of leaving a stale Host.
-      const hostRestart = previous.llm?.provider !== config.llm.provider
+      const memoryChanged = previous.memory?.enabled !== config.memory.enabled
+      const hostRestart = memoryChanged
+        || previous.llm?.provider !== config.llm.provider
         || previous.llm?.model !== config.llm.model
         || previous.llm?.baseUrl !== config.llm.baseUrl
         || String(previous.agent?.workspace || '') !== String(config.agent.workspace || '')
@@ -362,7 +391,12 @@ async function main(): Promise<void> {
           boundaries: config.persona.boundaries,
           instructions: config.persona.instructions,
         })
-      void botRuntime.applyConfig(config).then(() => {
+      void (memoryChanged ? memoryRuntime.restart(config) : Promise.resolve(memoryRuntime.status())).then(() => {
+        botRuntime.setMemory(memoryRuntime.url !== null && memoryRuntime.token !== null
+          ? { url: memoryRuntime.url, token: memoryRuntime.token }
+          : null)
+        return botRuntime.applyConfig(config)
+      }).then(() => {
         if (!hostRestart || process.env.WHALEGIRL_NO_RELAUNCH === '1') return
         setTimeout(() => { app.relaunch(); app.quit() }, 800)
       })
@@ -396,7 +430,7 @@ async function main(): Promise<void> {
     console.warn('bot config server:', error)
     return undefined
   })
-  app.on('will-quit', () => { void botRuntime.stop(); void botConfigServer?.close() })
+  app.on('will-quit', () => { void memoryRuntime.stop(); void botRuntime.stop(); void botConfigServer?.close() })
   const petApp = process.env.WHALEGIRL_PET_APP || '/Users/zhengzhi/Documents/projects/nisse/m3/pet/desktop'
   const petElectron = process.env.WHALEGIRL_PET_ELECTRON || '/Users/zhengzhi/Documents/projects/nisse/research/qwen-audio-agent/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'
   const voiceHome = process.env.WHALEGIRL_VOICE_HOME || '/tmp/nisse-m1/voice'

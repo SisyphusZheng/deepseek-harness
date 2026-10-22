@@ -17,6 +17,7 @@ export interface BotRuntimeConfig {
   voice?: { provider?: string; baseUrl?: string; apiKey?: string; model?: string; voice?: string; wakeWord?: string }
   llm?: { provider?: string; model?: string; baseUrl?: string; apiKey?: string }
   agent?: { mode?: string; workspace?: string; session?: string }
+  memory?: { enabled?: boolean }
   persona?: {
     name?: string
     personality?: string
@@ -27,6 +28,12 @@ export interface BotRuntimeConfig {
     boundaries?: string
     instructions?: string
   }
+}
+
+/** Loopback memory adapter endpoints published to the Host Integration profile layer. */
+export interface BotMemoryInfo {
+  url: string
+  token: string
 }
 
 /** Environment variable names each supported LLM provider route reads its key from. */
@@ -53,7 +60,13 @@ const DEFAULT_LLM = { provider: 'opencode-go', model: 'deepseek-v4.1-flash' }
  * user configures elsewhere in the DSH profile is preserved because only this
  * marked block is regenerated.
  */
-function managedPatch(config: BotRuntimeConfig, dshHome: string, llmEntry: string, hasUserLlmConfig: boolean): string {
+function managedPatch(
+  config: BotRuntimeConfig,
+  dshHome: string,
+  llmEntry: string,
+  hasUserLlmConfig: boolean,
+  memory: BotMemoryInfo | null,
+): string {
   const provider = String(config.llm?.provider || DEFAULT_LLM.provider).trim() || DEFAULT_LLM.provider
   const model = String(config.llm?.model || DEFAULT_LLM.model).trim() || DEFAULT_LLM.model
   const workspace = String(config.agent?.workspace || '').trim() || join(dshHome, 'workspace')
@@ -90,6 +103,10 @@ function managedPatch(config: BotRuntimeConfig, dshHome: string, llmEntry: strin
     `    workspaceDir: ${JSON.stringify(workspace)}`,
     `    dshLlmEntry: ${JSON.stringify(llmEntry)}`,
     '    permissionPreset: bot-outside-write',
+    ...(memory === null ? [] : [
+      `    memoryUrl: ${JSON.stringify(memory.url)}`,
+      `    memoryToken: ${JSON.stringify(memory.token)}`,
+    ]),
   ]
   if (!hasUserLlmConfig) {
     const keyEnv = LLM_KEY_ENV[provider] ?? CUSTOM_LLM_KEY_ENV
@@ -133,10 +150,20 @@ function applyLlmEnvironment(config: BotRuntimeConfig): void {
 
 export class BotRuntime {
   private child: ChildProcess | null = null
+  private memory: BotMemoryInfo | null = null
   private lastError = ''
   readonly port = Number(process.env.WHALEGIRL_VOICE_PORT || 59002)
 
   constructor(private readonly dshHome: string, private readonly resourcesPath = process.resourcesPath) {}
+
+  /**
+   * Publish the built-in memory adapter endpoints so the managed profile layer
+   * configures the Host Integration for long-term memory.
+   * @param memory - loopback URL/token, or null to keep memory off.
+   */
+  setMemory(memory: BotMemoryInfo | null): void {
+    this.memory = memory
+  }
 
   /** Read the persisted Bot settings without creating or defaulting the file. */
   readConfig(): BotRuntimeConfig {
@@ -180,7 +207,7 @@ export class BotRuntime {
     const userPart = existingPatch
       .replace(new RegExp(`${MANAGED_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?${MANAGED_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'g'), '')
     const hasUserLlmConfig = /(^|\n)\s*-?\s*id:\s*llm-pi-ai\b/.test(userPart)
-    writeFileSync(patchFile, rewriteManagedBlock(existingPatch, managedPatch(config, this.dshHome, llm, hasUserLlmConfig)))
+    writeFileSync(patchFile, rewriteManagedBlock(existingPatch, managedPatch(config, this.dshHome, llm, hasUserLlmConfig, this.memory)))
   }
 
   /**

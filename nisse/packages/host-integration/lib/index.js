@@ -234,11 +234,17 @@ export function apply(ctx, config = {}) {
       return parsed && typeof parsed === 'object' ? parsed : null
     } catch { return null }
   }
-  function persistBotSession(id, workspace) {
+  function persistBotSession(id, workspace, index = conversationIndex, contextTokens = lastContextTokens) {
     try {
-      writeFileSync(botSessionFile, JSON.stringify({ sessionId: id, workspace }, null, 2) + '\n')
+      writeFileSync(botSessionFile, JSON.stringify({ sessionId: id, workspace, index, contextTokens }, null, 2) + '\n')
       chmodSync(botSessionFile, 0o600)
     } catch (error) { log('bot session persist failed: ' + messageOf(error)) }
+  }
+  /** Index of the current conversation inside the fixed Bot conversation area. */
+  function persistedConversationIndex() {
+    const recorded = readBotSession()
+    if (!recorded || recorded.workspace !== canonicalWorkspaceDir()) return 1
+    return Number.isInteger(recorded.index) && recorded.index > 0 ? recorded.index : 1
   }
   /** Resume the recorded Bot conversation only while it belongs to the configured workspace. */
   function persistedSessionId() {
@@ -266,11 +272,14 @@ export function apply(ctx, config = {}) {
   let handle = null
   let agent = null
   let sessionId = ''
+  let conversationIndex = 1
+  let lastContextTokens = 0
   let currentTurn = null
   let lastTurn = null
   let turnCount = 0
   let submitted = 0
   let submittedText = ''
+  let turnAssistantText = ''
   // W2 bridge subset: the voice client scopes a turn with its own client turn id.
   let activeClientTurnId = ''
   const bridgeFrames = []
@@ -472,12 +481,15 @@ export function apply(ctx, config = {}) {
     switch (event.type) {
       case 'turn/start':
         currentTurn = data.turn
+        turnAssistantText = ''
         turnCount = Math.max(turnCount, data.turn || 0)
         push('turn.started', { ...base, data: { durableSeq: event.seq } })
         break
       case 'turn/end': {
         const reason = data.reason || {}
         lastTurn = { turn: data.turn, terminal: String(reason.kind || 'unknown'), reason }
+        try { persistBotSession(sessionId, canonicalWorkspaceDir(), conversationIndex, lastContextTokens) } catch { /* ignore */ }
+        rememberTurn(base.turnId)
         push('turn.ended', {
           ...base,
           data: { durableSeq: event.seq, terminal: String(reason.kind || 'unknown'), reason },
@@ -549,6 +561,7 @@ export function apply(ctx, config = {}) {
         if (frame.type !== 'chunk') return
         const chunk = frame.chunk || {}
         if (chunk.type === 'text-delta') {
+          if (matchesSession(sid) && typeof chunk.text === 'string') turnAssistantText += chunk.text
           push('assistant.delta', {
             sessionId: sid,
             turn,
@@ -557,10 +570,15 @@ export function apply(ctx, config = {}) {
         } else if (chunk.type === 'tool-call-delta') {
           push('tool.delta', { sessionId: sid, turn, data: { name: chunk.name || '', callId: chunk.id || null } })
         } else if (chunk.type === 'usage') {
+          const usage = chunk.usage ?? chunk
+          const promptTokens = Number(usage?.totalTokens ?? usage?.inputTokens ?? usage?.promptTokens)
+          if (matchesSession(sid) && Number.isFinite(promptTokens) && promptTokens > 0) {
+            lastContextTokens = Math.max(lastContextTokens, promptTokens)
+          }
           push('assistant.usage', {
             sessionId: sid,
             turn,
-            data: { usage: chunk.usage ?? chunk, rawKeys: Object.keys(chunk) },
+            data: { usage, rawKeys: Object.keys(chunk) },
           })
         }
       } catch (error) {
@@ -650,6 +668,21 @@ export function apply(ctx, config = {}) {
     log('ctx.on unavailable; durable events will only be backfilled on idle')
   }
 
+  /** Persist one finished turn into long-term memory (episode) when memory is configured. */
+  function rememberTurn(turnId) {
+    if (!memoryUrl) return
+    const user = String(submittedText || '').trim()
+    const assistant = String(turnAssistantText || '').trim()
+    if (user === '' || assistant === '') return
+    const text = `用户：${user.slice(0, 4000)}\n助手：${assistant.slice(0, 8000)}`
+    void memoryRequest('POST', '/write', {
+      items: [{ kind: 'episode', text, namespace: 'global', tags: ['bot-conversation'] }],
+      writer: 'bot',
+      opts: { source: { sessionId, ...(turnId === null || turnId === undefined ? {} : { turnId: String(turnId) }) } },
+    }).then(() => auditEvent('memory.written', { turnId: turnId ?? null, chars: text.length }))
+      .catch((error) => log('memory write failed: ' + messageOf(error)))
+  }
+
   function backfill() {
     try {
       const session = agent?.session
@@ -679,6 +712,12 @@ export function apply(ctx, config = {}) {
       mkdirSync(target, { recursive: true })
       const workspace = await registry.create(target, basename(target) || 'Bot')
       botWorkspace = workspace
+      // The area is a fixed, dedicated folder for Bot conversations; keep a clear
+      // display title unless the user renamed it themselves.
+      try {
+        const current = String(workspace?.title || '')
+        if (current === '' || current === 'Bot' || current === basename(target)) await workspace.setTitle?.('Bot 对话区')
+      } catch (error) { log('bot workspace title update failed: ' + messageOf(error)) }
       log('bot workspace ready', { path: target, id: workspace?.id === undefined ? null : String(workspace.id) })
       return workspace
     } catch (error) {
@@ -687,17 +726,18 @@ export function apply(ctx, config = {}) {
     }
   }
 
-  /** Give the fixed Bot conversation its stable title (user titles survive automatic naming). */
-  function titleBotSession(session) {
+  /** Give one Bot conversation its stable title (user titles survive automatic naming). */
+  function titleBotSession(session, title) {
+    const text = String(title || 'Bot 对话')
     try {
       const titles = ctx.get?.('sessionTitle')
       if (titles && typeof titles.rename === 'function') {
-        titles.rename(session, 'Bot 对话')
+        titles.rename(session, text)
         return true
       }
     } catch { /* fall through to a direct durable append */ }
     try {
-      session.append('session/title', { title: 'Bot 对话', messageSeqs: [], source: { kind: 'user' } })
+      session.append('session/title', { title: text, messageSeqs: [], source: { kind: 'user' } })
       return true
     } catch (error) {
       log('bot session title failed: ' + messageOf(error))
@@ -722,6 +762,49 @@ export function apply(ctx, config = {}) {
     }
   }
 
+  /**
+   * Start a new conversation inside the fixed Bot conversation area. Used when the
+   * current conversation no longer fits the model context, when the user changes the
+   * Bot workspace, or on an explicit request. The previous conversation stays in the
+   * area (attached to the workspace) with its title.
+   */
+  async function startNewConversation(reason) {
+    const previous = sessionId
+    const previousIndex = conversationIndex
+    log('bot conversation rotate', { reason, previous, previousIndex })
+    auditEvent('conversation.rotated', { reason, previous, previousIndex })
+    try { await handle?.dispose?.() } catch (error) { log('bot conversation dispose failed: ' + messageOf(error)) }
+    agent = null
+    handle = null
+    sessionId = ''
+    lastContextTokens = 0
+    const recorded = readBotSession()
+    conversationIndex = recorded && recorded.workspace === canonicalWorkspaceDir() ? previousIndex + 1 : 1
+    persistBotSession('', canonicalWorkspaceDir(), conversationIndex, 0)
+    const next = await ensureAgent()
+    push('conversation.new', { sessionId, data: { reason, index: conversationIndex, previous } })
+    return { sessionId, index: conversationIndex, previous, agent: Boolean(next) }
+  }
+
+  /** Threshold (estimated prompt tokens) after which a new conversation starts. */
+  function rotationTokenLimit() {
+    const configured = Number(String(config.rotateTokens || process.env.NISSE_BOT_ROTATE_TOKENS || '').trim())
+    return Number.isFinite(configured) && configured > 0 ? configured : 90_000
+  }
+
+  /** Rotate before a turn when the workspace changed or the conversation is full. */
+  async function ensureConversationForTurn() {
+    if (agent) {
+      const cwd = agent.session?.header?.cwd
+      if (typeof cwd === 'string' && cwd !== canonicalWorkspaceDir()) {
+        await startNewConversation('workspace-change')
+      } else if (lastContextTokens >= rotationTokenLimit()) {
+        await startNewConversation('context-full')
+      }
+    }
+    return ensureAgent()
+  }
+
   async function ensureAgent() {
     if (agent) return agent
     if (typeof ctx.agents?.create !== 'function') throw new Error('ctx.agents.create is unavailable')
@@ -733,6 +816,11 @@ export function apply(ctx, config = {}) {
         ? { provider: defaultSelection.provider, model: defaultSelection.model, ...(reasoningEffort ? { reasoningEffort } : {}) }
         : undefined
     await ensureBotWorkspace()
+    conversationIndex = persistedConversationIndex()
+    const recorded = readBotSession()
+    if (recorded && recorded.workspace === canonicalWorkspaceDir() && Number.isFinite(recorded.contextTokens)) {
+      lastContextTokens = Number(recorded.contextTokens)
+    }
     const requestedSessionId = sessionId || persistedSessionId() || randomUUID()
     const digest = await memoryDigest()
     const personaSetup = agentCtx => {
@@ -775,7 +863,7 @@ export function apply(ctx, config = {}) {
     agent = created.agent
     sessionId = String(agent.session.id)
     persistBotSession(sessionId, canonicalWorkspaceDir())
-    if (!resumed) titleBotSession(agent.session)
+    if (!resumed) titleBotSession(agent.session, 'Bot 对话 ' + String(conversationIndex))
     // Membership: a session created directly through the Agent factory is not
     // attached to the Workspace record by the Workspace controller, so attach it
     // here; without this the Bot conversation would surface under the ungrouped
@@ -812,7 +900,7 @@ export function apply(ctx, config = {}) {
   async function submitTurn(text, { clientTurnId = '' } = {}) {
     const trimmed = String(text || '').trim()
     if (!trimmed) throw new Error('text required')
-    await ensureAgent()
+    await ensureConversationForTurn()
     lastTurn = null
     submitted += 1
     submittedText = trimmed
@@ -892,6 +980,9 @@ export function apply(ctx, config = {}) {
         created: Boolean(agent),
         status: String(agent?.status || 'idle'),
         lastTurn,
+        conversationIndex,
+        contextTokens: lastContextTokens,
+        rotateTokenLimit: rotationTokenLimit(),
       },
       counts: { events: events.length, submitted, turns: turnCount, durableSeq, bridgeFrames: bridgeFrames.length, sseSubscribers: sseSubscribers.size },
       eventTypes: [...new Set(events.map((event) => event.type))],
@@ -975,6 +1066,11 @@ export function apply(ctx, config = {}) {
         const body = await readBody(req)
         try { return json(res, 200, await memoryRequest('POST', url.pathname.slice('/memory'.length), body)) }
         catch (error) { return json(res, 503, { ok: false, error: { code: error.code || 'MEMORY_UNAVAILABLE', message: messageOf(error) } }) }
+      }
+      if (url.pathname === '/conversation/new' && req.method === 'POST') {
+        await readBody(req).catch(() => ({}))
+        const rotated = await startNewConversation('manual')
+        return json(res, 200, { ok: true, ...rotated, conversationIndex })
       }
       if (url.pathname === '/sessions/create' && req.method === 'POST') {
         await readBody(req).catch(() => ({}))
@@ -1124,14 +1220,10 @@ export function apply(ctx, config = {}) {
     void (async () => {
       await ensureBotWorkspace()
       await attachPersistedSession()
-      // The fixed Bot conversation exists from launch (not only after the first
-      // voice turn) so the desktop always shows it in its own workspace.
+      // The conversation area always holds one current conversation, even before
+      // the first voice turn; it is resumed on later launches instead of recreated.
       try {
-        const hadPersisted = persistedSessionId() !== ''
         await ensureAgent()
-        if (!hadPersisted) titleBotSession(agent.session)
-        const registry = ctx.get?.('workspaceRegistry')
-        if (registry && typeof registry.pinSession === 'function') await registry.pinSession(sessionId)
       } catch (error) {
         log('bot conversation startup failed: ' + messageOf(error))
       }

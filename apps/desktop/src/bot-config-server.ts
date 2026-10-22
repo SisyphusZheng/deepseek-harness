@@ -29,6 +29,7 @@ export interface BotConfig {
     instructions: string
   }
   app: { autoStart: boolean; keepRunning: boolean }
+  memory: { enabled: boolean }
 }
 
 /** Browser-facing config: a stored secret becomes a presence boolean. */
@@ -43,6 +44,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   agent: { mode: 'dsh', workspace: '', session: '' },
   persona: { name: 'Nisse（家灵）', personality: '自然、可靠，有一点鲸鱼娘的温柔与俏皮，但不过度卖萌；有自己的判断，不刻意迎合；做事干脆。', tone: '简短、清楚、不啰嗦；必要时先给结论。', background: '', quirks: '', addressUser: '', boundaries: '', instructions: '事实与执行结果必须来自 DSH；不编造执行结果。' },
   app: { autoStart: true, keepRunning: true },
+  memory: { enabled: true },
 }
 
 const CONFIG_FILE = 'config.json'
@@ -60,6 +62,7 @@ function normalize(input: unknown): BotConfig {
   const raw = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
   const voice = sectionOf(raw, 'voice'); const llm = sectionOf(raw, 'llm')
   const agent = sectionOf(raw, 'agent'); const persona = sectionOf(raw, 'persona'); const appSection = sectionOf(raw, 'app')
+  const memorySection = sectionOf(raw, 'memory')
   return {
     voice: {
       provider: normalizeVoiceProviderId(clampText(voice.provider, DEFAULT_BOT_CONFIG.voice.provider)),
@@ -94,6 +97,7 @@ function normalize(input: unknown): BotConfig {
       autoStart: appSection.autoStart !== false,
       keepRunning: appSection.keepRunning !== false,
     },
+    memory: { enabled: memorySection.enabled !== false },
   }
 }
 
@@ -237,7 +241,10 @@ var schema = [
   {id:'app', label:'应用程序', fields:[
     {key:'autoStart', label:'开机启动', type:'checkbox'},
     {key:'keepRunning', label:'窗口关闭后保持运行', type:'checkbox'}
-  ]}
+  ]},
+  {id:'memory', label:'记忆', fields:[
+    {key:'enabled', label:'启用长期记忆', type:'checkbox'}
+  ], memory:true}
 ];
 var config=null; var active='voice';
 var tabs=document.getElementById('tabs'), panels=document.getElementById('panels'), status=document.getElementById('status');
@@ -299,6 +306,49 @@ function render(){
         };
         testRow.appendChild(testBtn); testRow.appendChild(testResult); p.appendChild(testRow);
       }
+      if (spec.memory){
+        var mem=el('div','memory-box');
+        var memStatus=el('div','hint',''); memStatus.id='memory-status';
+        var searchRow=el('div','test-row');
+        var searchInput=el('input'); searchInput.placeholder='搜索记忆（例如：我的偏好）'; searchInput.id='memory-query';
+        var searchBtn=el('button','test','搜索');
+        var exportBtn=el('button','test','导出');
+        var forgetBtn=el('button','test','清空');
+        var results=el('div','memory-results',''); results.id='memory-results';
+        searchBtn.onclick=async function(){
+          results.textContent='搜索中…';
+          var r=await fetch('/bot/memory/search',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query:searchInput.value||'',limit:8,budgetTokens:1200})});
+          var j=await r.json();
+          var hits=(j.result&&j.result.hits)||[];
+          if(!j.ok){ results.textContent='搜索失败：'+((j.error&&j.error.message)||j.error||r.status); return; }
+          if(!hits.length){ results.textContent='没有找到相关记忆。'; return; }
+          results.textContent=hits.map(function(h){return '· '+(h.text||h.content||JSON.stringify(h)).slice(0,240)}).join('\\n');
+        };
+        exportBtn.onclick=async function(){
+          results.textContent='导出中…';
+          var r=await fetch('/bot/memory/export',{method:'POST'});
+          var j=await r.json();
+          results.textContent=j.ok?('已导出：'+JSON.stringify(j.result&&j.result.export||j.result)):('导出失败：'+JSON.stringify(j.error||r.status));
+        };
+        forgetBtn.onclick=async function(){
+          if(!window.confirm('清空全部长期记忆？此操作不可撤销。')) return;
+          results.textContent='清空中…';
+          var r=await fetch('/bot/memory/forget',{method:'POST'});
+          var j=await r.json();
+          results.textContent=j.ok?'已清空长期记忆。':('清空失败：'+JSON.stringify(j.error||r.status));
+        };
+        searchRow.appendChild(searchInput); searchRow.appendChild(searchBtn); searchRow.appendChild(exportBtn); searchRow.appendChild(forgetBtn);
+        mem.appendChild(memStatus); mem.appendChild(searchRow); mem.appendChild(results);
+        p.appendChild(mem);
+        var refreshMemory=async function(){
+          try{ var s=await (await fetch('/bot/memory/status')).json(); var st=s.status||{};
+            memStatus.textContent='记忆服务：'+(st.enabled?(st.sidecar?'运行中 · 库 '+st.bank+' · 数据 '+st.dataRoot:'未就绪 · '+(st.error||'')):'已关闭');
+          }catch(e){ memStatus.textContent='记忆服务：状态读取失败'; }
+        };
+        refreshMemory(); setTimeout(refreshMemory,300);
+        if(window.__memoryStatusTimer) clearInterval(window.__memoryStatusTimer);
+        window.__memoryStatusTimer=setInterval(refreshMemory,4000);
+      }
       panels.appendChild(p);
     })(schema[s]);
   }
@@ -334,6 +384,14 @@ export interface BotConfigHooks {
   onApproval?: (id: string, decision: string) => unknown | Promise<unknown>
   /** Native directory picker; returns the chosen absolute path or null when cancelled. */
   onPickDirectory?: () => string | null | Promise<string | null>
+  /** Built-in long-term memory runtime status. */
+  onMemoryStatus?: () => unknown
+  /** Recall from long-term memory. */
+  onMemorySearch?: (query: string) => unknown | Promise<unknown>
+  /** Export all long-term memory. */
+  onMemoryExport?: () => unknown | Promise<unknown>
+  /** Forget all long-term memory. */
+  onMemoryForget?: () => unknown | Promise<unknown>
 }
 
 /** Optional injectable seams (tests supply a mock fetch; production uses the real one). */
@@ -395,6 +453,15 @@ export async function startBotConfigServer(
         }
         return
       }
+      if (url.pathname === '/bot/memory/status' && req.method === 'GET') { reply(200, { ok: true, status: hooks.onMemoryStatus?.() ?? null }); return }
+      if (url.pathname === '/bot/memory/search' && req.method === 'POST') {
+        const body = await readBody(req).catch(() => ({})) as { query?: string; limit?: number; budgetTokens?: number }
+        const result = await hooks.onMemorySearch?.(String(body.query || '')) ?? null
+        reply(200, { ok: true, result })
+        return
+      }
+      if (url.pathname === '/bot/memory/export' && req.method === 'POST') { reply(200, { ok: true, result: await hooks.onMemoryExport?.() ?? null }); return }
+      if (url.pathname === '/bot/memory/forget' && req.method === 'POST') { reply(200, { ok: true, result: await hooks.onMemoryForget?.() ?? null }); return }
       if (url.pathname === '/bot/config' && req.method === 'GET') { reply(200, { ok: true, config: toView(await readConfig(configDir)) }); return }
       if (url.pathname === '/bot/config' && (req.method === 'PUT' || req.method === 'POST')) {
         const stored = await readConfig(configDir)
