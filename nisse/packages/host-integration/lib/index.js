@@ -243,6 +243,8 @@ export function apply(ctx, config = {}) {
     log('write approval policy installed')
   }
 
+  let approvalAnswerer = null
+
   const log = (...args) => {
     try { console.log('[nisse-host-integration]', ...args) } catch { /* ignore */ }
   }
@@ -510,7 +512,7 @@ export function apply(ctx, config = {}) {
     // and only for the read-only model-facing `read` tool. Everything else is
     // delegated (fail-closed as in production). The durable approval/asked and
     // approval/decided events are recorded through the session/event observer.
-    const approvalHandler = (req, next) => {
+    approvalAnswerer = (req, next) => {
       try {
         const sid = req?.agent?.session?.id
         if (!matchesSession(sid)) return next()
@@ -544,8 +546,6 @@ export function apply(ctx, config = {}) {
         return next()
       }
     }
-    ctx.on('approval/request', approvalHandler)
-    ctx.on('approval/asked', approvalHandler)
   } else {
     log('ctx.on unavailable; durable events will only be backfilled on idle')
   }
@@ -578,6 +578,12 @@ export function apply(ctx, config = {}) {
           systemPrompt.section({ name: 'nisse-persona', order: 120, text: personaText(persona), interpolate: false })
           if (digest) systemPrompt.section({ name: 'nisse-memory', order: 130, text: '长期记忆摘要：\n' + digest, interpolate: false })
         }
+        try {
+          if (typeof agentCtx?.on === 'function' && approvalAnswerer) {
+            agentCtx.on('approval/request', approvalAnswerer)
+            log('approval answerer registered in agent scope')
+          }
+        } catch (error) { log('approval answerer registration failed: ' + messageOf(error)) }
       } catch (error) {
         log('persona prompt section registration failed: ' + messageOf(error))
       }
@@ -607,6 +613,7 @@ export function apply(ctx, config = {}) {
     handle = created
     agent = created.agent
     sessionId = String(agent.session.id)
+
     try {
       const presets = ctx.permissionPresets || ctx.get?.('permissionPresets')
       if (presets && typeof presets.set === 'function') { presets.set(agent.session, permissionPreset); log('permission preset applied', { preset: permissionPreset }) }
