@@ -171,6 +171,8 @@ export function apply(ctx, config = {}) {
   const provider = String(config.provider || process.env.NISSE_M1_PROVIDER || '').trim()
   const model = String(config.model || process.env.NISSE_M1_MODEL || '').trim()
   const reasoningEffort = String(config.reasoningEffort || process.env.NISSE_M1_REASONING_EFFORT || '').trim()
+  const memoryUrl = String(config.memoryUrl || process.env.NISSE_MEMORY_URL || '').replace(/\/$/, '')
+  const memoryToken = String(config.memoryToken || process.env.NISSE_MEMORY_TOKEN || '')
   const hostPid = process.pid
   const startedAt = now()
   const token = randomUUID()
@@ -221,6 +223,32 @@ export function apply(ctx, config = {}) {
     for (let i = policies.length - 1; i >= 0; i -= 1) {
       if (policies[i].expiresAt && Date.parse(policies[i].expiresAt) <= t) policies.splice(i, 1)
     }
+  }
+
+  async function memoryRequest(method, path, body) {
+    if (!memoryUrl) throw new Error('memory backend not configured')
+    const res = await fetch(memoryUrl + path, {
+      method,
+      headers: { authorization: 'Bearer ' + memoryToken, 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(120000),
+    })
+    const json = await res.json().catch(() => null)
+    if (!res.ok || json?.ok === false) {
+      const error = new Error(json?.error?.message || `memory backend http ${res.status}`)
+      error.code = json?.error?.code || 'MEMORY_UNAVAILABLE'
+      throw error
+    }
+    return json
+  }
+
+  async function memoryDigest() {
+    if (!memoryUrl) return ''
+    try {
+      const result = await memoryRequest('POST', '/digest', { budgetTokens: 500 })
+      const text = result?.digest?.text || result?.digest?.content || ''
+      return typeof text === 'string' ? text.slice(0, 4000) : ''
+    } catch (error) { log('memory digest unavailable: ' + messageOf(error)); return '' }
   }
 
   function activePolicy(toolName, reason) {
@@ -503,11 +531,13 @@ export function apply(ctx, config = {}) {
         ? { provider: defaultSelection.provider, model: defaultSelection.model, ...(reasoningEffort ? { reasoningEffort } : {}) }
         : undefined
     const requestedSessionId = sessionId || randomUUID()
+    const digest = await memoryDigest()
     const personaSetup = agentCtx => {
       try {
         const systemPrompt = agentCtx?.systemPrompt
         if (typeof systemPrompt?.section === 'function') {
           systemPrompt.section({ name: 'nisse-persona', order: 120, text: personaText(persona), interpolate: false })
+          if (digest) systemPrompt.section({ name: 'nisse-memory', order: 130, text: '长期记忆摘要：\n' + digest, interpolate: false })
         }
       } catch (error) {
         log('persona prompt section registration failed: ' + messageOf(error))
@@ -612,6 +642,7 @@ export function apply(ctx, config = {}) {
         session: Boolean(ctx.get?.('session')),
         approval: Boolean(ctx.get?.('approval')),
         tools: Boolean(ctx.get?.('tools')),
+        memory: Boolean(memoryUrl),
       },
       paths: {
         dshHome: String(process.env.DSH_HOME || ''),
@@ -698,6 +729,15 @@ export function apply(ctx, config = {}) {
       if (url.pathname === '/audit' && req.method === 'GET') {
         const limit = Math.min(1000, Math.max(1, Number(url.searchParams.get('limit') || 200)))
         return json(res, 200, { ok: true, count: auditEvents.length, events: auditEvents.slice(-limit) })
+      }
+      if (url.pathname.startsWith('/memory/') && req.method === 'GET') {
+        try { return json(res, 200, await memoryRequest('GET', url.pathname.slice('/memory'.length))) }
+        catch (error) { return json(res, 503, { ok: false, error: { code: error.code || 'MEMORY_UNAVAILABLE', message: messageOf(error) } }) }
+      }
+      if (url.pathname.startsWith('/memory/') && req.method === 'POST') {
+        const body = await readBody(req)
+        try { return json(res, 200, await memoryRequest('POST', url.pathname.slice('/memory'.length), body)) }
+        catch (error) { return json(res, 503, { ok: false, error: { code: error.code || 'MEMORY_UNAVAILABLE', message: messageOf(error) } }) }
       }
       if (url.pathname === '/sessions/create' && req.method === 'POST') {
         await readBody(req).catch(() => ({}))
