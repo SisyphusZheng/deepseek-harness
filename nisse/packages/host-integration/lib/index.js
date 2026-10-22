@@ -27,7 +27,7 @@ import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 export const name = 'nisse-host-integration'
-export const inject = ['agents', 'permissionPresets']
+export const inject = ['agents', 'permissionPresets', 'approval']
 
 const CONTRACT_EVENT_MAP = {
   'user.message': 'turn.started',
@@ -210,16 +210,31 @@ export function apply(ctx, config = {}) {
   function installWriteApprovalPolicy() {
     if (typeof ctx.on !== 'function') return
     const root = resolve(workspaceDir)
+    const mutating = /(?:^|[;&|]\s*)(?:touch|mkdir|rm|cp|mv|tee|dd|printf|echo|cat\s*>|sed\s+-i|perl\s+-pi|python3?\s+-c)/i
     ctx.on('tools/pre-execute', async (exec, next) => {
       try {
-        if (exec?.name !== 'write') return next()
+        const name = String(exec?.name || '')
         const args = exec?.arguments && typeof exec.arguments === 'object' ? exec.arguments : {}
-        const target = String(args.path || args.file_path || args.filePath || '')
+        const isWrite = name === 'write'
+        const isShell = /terminal|bash|shell|exec/i.test(name)
+        if (!isWrite && !isShell) return next()
+        let target = ''
+        if (isWrite) target = String(args.path || args.file_path || args.filePath || '')
+        else {
+          const command = String(args.command || args.cmd || args.input || args.text || '')
+          const match = command.match(/\/Users\/[^\s'"`;|&]+|\/var\/[^\s'"`;|&]+|\/etc\/[^\s'"`;|&]+/g) || []
+          if (!mutating.test(command) || match.length === 0) return next()
+          target = match.find((candidate) => {
+            const relCandidate = relative(root, resolve(candidate))
+            return relCandidate.startsWith('..') || relCandidate.startsWith('/') || relCandidate.includes(':')
+          }) || ''
+        }
         if (!target) return next()
         const absolute = resolve(target)
         const rel = relative(root, absolute)
         if (!rel.startsWith('..') && !rel.startsWith('/') && !rel.includes(':')) return next()
-        return { kind: 'ask', reason: `write outside workspace: ${absolute}`, displayReason: { en: `Write outside workspace: ${absolute}`, zh: `写入工作区外文件：${absolute}` } }
+        log('approval preflight ask', { tool: name, target: absolute })
+        return { kind: 'ask', reason: `${name} outside workspace: ${absolute}`, displayReason: { en: `${name} outside workspace: ${absolute}`, zh: `${name} 写入工作区外文件：${absolute}` } }
       } catch (error) {
         log('write approval policy failed: ' + messageOf(error))
         return next()
