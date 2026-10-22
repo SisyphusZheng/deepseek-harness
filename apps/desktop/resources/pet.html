@@ -13,22 +13,26 @@ body{-webkit-app-region:drag;display:flex;flex-direction:column;align-items:cent
 <script>
 (async () => {
   const pet = document.getElementById('pet')
-  let frames = [0,1,2,3,4,5], fps = 2, fw = 256, fh = 104
+  let frames = [0,1,2,3,4,5], fps = 2, fw = 256, fh = 156, rows = 12, displayW = 176, displayH = 107
   try {
     const meta = await (await fetch('whale-girl/pet.json')).json()
     const idle = meta.animations?.idle
     if (idle?.frames?.length) { frames = idle.frames; fps = idle.fps || 2 }
+    const all = Object.values(meta.animations || {}).flatMap((a) => a.frames || [])
+    const maxFrame = all.length ? Math.max(...all) : 35
+    rows = Math.max(1, Math.ceil((maxFrame + 1) / 6))
     const sheet = new Image(); sheet.src = 'whale-girl/spritesheet.webp'
     await new Promise((resolve) => { sheet.onload = resolve; sheet.onerror = resolve })
-    if (sheet.naturalWidth) { fw = sheet.naturalWidth / 6; fh = fw * (156 / 256) }
+    if (sheet.naturalWidth && sheet.naturalHeight) { fw = sheet.naturalWidth / 6; fh = sheet.naturalHeight / rows }
   } catch {}
-  pet.style.width = '176px'; pet.style.height = Math.round(176 * (fh / fw)) + 'px'
-  pet.style.backgroundSize = (6 * 176) + 'px ' + Math.round((6 * 176) * (fh / fw)) + 'px'
+  displayH = Math.round(displayW * (fh / fw))
+  pet.style.width = displayW + 'px'; pet.style.height = displayH + 'px'
+  pet.style.backgroundSize = (6 * displayW) + 'px ' + (rows * displayH) + 'px'
   let i = 0
   const tick = () => {
     const index = frames[Math.floor(i / Math.max(1, Math.round(60 / fps)))] ?? frames[0]
     const col = index % 6, row = Math.floor(index / 6)
-    pet.style.backgroundPosition = (-col * 176) + 'px ' + (-row * Math.round(176 * (fh / fw))) + 'px'
+    pet.style.backgroundPosition = (-col * displayW) + 'px ' + (-row * displayH) + 'px'
     i = (i + 1) % (frames.length * Math.max(1, Math.round(60 / fps)))
     requestAnimationFrame(tick)
   }
