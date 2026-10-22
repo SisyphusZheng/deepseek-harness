@@ -44,6 +44,14 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 export const inject = ['slots', 'locale', 'remote', 'remote.account', 'remote.session', 'theme', 'configForms']
 /** Register account UI in Desktop and plain Web clients. @param ctx - client plugin context. */
 export function apply(ctx: Context): void {
+  // WhaleGirl Bot internal fan build: local BYOK only, no account/login UI.
+  // Keep the upstream registration body in a separate (unexported from apply)
+  // function so a future account mode can opt back in; this build does not call it.
+  void ctx
+}
+
+/** Upstream account settings/onboarding/avatar/quota registration (disabled in this build). */
+export function registerAccountUi(ctx: Context): void {
   const desktop = 'dshDesktop' in globalThis
   ctx.effect(() => ctx.locale.register('settings.account', { en, zh }), 'account: dictionaries')
   const t = ctx.locale.bind('settings.account')
@@ -302,7 +310,7 @@ export function apply(ctx: Context): void {
     ctx.slots.inject('shell.overlay', () => ctx.slots.register({
       name: 'shell.overlay', id: 'account.platform-page', locale: 'settings.account',
       inject: (): AccountPlatformHostInjected => ({
-        platform: nativePlatform, hooks: { page: platformPages },
+        platform: nativePlatform as PlatformBridge, hooks: { page: platformPages },
         closePage: platformPages.close,
       }),
     }, AccountPlatformHost))
