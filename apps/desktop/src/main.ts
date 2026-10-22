@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { startBotConfigServer } from './bot-config-server.ts'
 import { BotRuntime } from './bot-runtime.ts'
+import { createPetWindow } from './pet-window.ts'
 import { fileURLToPath } from 'node:url'
 import {
   app,
@@ -356,8 +357,16 @@ async function main(): Promise<void> {
   let startup: Promise<void> | undefined
   let workspaceRecovery: Promise<void> | undefined
   let mainWindow: BrowserWindow | undefined
+  let petWindow: BrowserWindow | undefined
   let welcomeWindow: BrowserWindow | undefined
   let enteredWorkspace = false
+  app.whenReady().then(() => {
+    petWindow = createPetWindow({ resources: process.resourcesPath, onOpenMain: () => {
+      const window = mainWindow ?? createMainWindow()
+      window.show(); window.focus()
+    } })
+    app.on('will-quit', () => { try { petWindow?.destroy() } catch {} })
+  }).catch(() => undefined)
   // NSIS passes --updated when it launches the application after installation.
   let raiseAfterUpdate = process.platform === 'win32' && process.argv.includes('--updated')
   let shellInstallerOwnsQuit = false
