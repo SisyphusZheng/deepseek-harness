@@ -23,7 +23,7 @@
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
-import { dirname, join, relative, resolve } from 'node:path'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 export const name = 'nisse-host-integration'
@@ -169,7 +169,7 @@ export function loadPersona() {
 export function apply(ctx, config = {}) {
   const dshHome = String(process.env.DSH_HOME || '/tmp/dsh-home')
   const bridgeDir = String(config.ipcDir || process.env.NISSE_IPC_DIR || join(dshHome, 'nisse'))
-  const workspaceDir = String(config.workspaceDir || process.env.NISSE_WORKSPACE || join(dshHome, 'workspace'))
+  const fallbackWorkspaceDir = String(config.workspaceDir || process.env.NISSE_WORKSPACE || join(dshHome, 'workspace'))
   const provider = String(config.provider || process.env.NISSE_M1_PROVIDER || '').trim()
   const model = String(config.model || process.env.NISSE_M1_MODEL || '').trim()
   const reasoningEffort = String(config.reasoningEffort || process.env.NISSE_M1_REASONING_EFFORT || '').trim()
@@ -180,9 +180,37 @@ export function apply(ctx, config = {}) {
   const startedAt = now()
   const token = randomUUID()
   const bridgeFile = join(bridgeDir, 'host-integration.json')
+  const botConfigFile = join(dshHome, 'bot', 'config.json')
+
+  /** Read the user's Bot settings (DSH_HOME/bot/config.json), tolerating absence/mid-write. */
+  function readBotConfig() {
+    try {
+      const parsed = JSON.parse(readFileSync(botConfigFile, 'utf8'))
+      return parsed && typeof parsed === 'object' ? parsed : {}
+    } catch { return {} }
+  }
+  /**
+   * The Bot workspace the user picked in DSH Settings -> Bot, or the deployment
+   * fallback. Re-read on every use so a settings change applies to the next Bot
+   * session without restarting the DSH host.
+   */
+  function configuredWorkspaceDir() {
+    const configured = String(readBotConfig()?.agent?.workspace || '').trim()
+    if (configured) return resolve(configured)
+    return fallbackWorkspaceDir
+  }
+  /** Bot-scoped LLM selection: settings llm section wins, then profile config, then the DSH default model. */
+  function configuredAgentSelection() {
+    const llm = readBotConfig()?.llm
+    const llmProvider = String(llm?.provider || '').trim()
+    const llmModel = String(llm?.model || '').trim()
+    if (llmProvider && llmModel) return { provider: llmProvider, model: llmModel }
+    if (provider && model) return { provider, model }
+    return null
+  }
 
   mkdirSync(bridgeDir, { recursive: true })
-  mkdirSync(workspaceDir, { recursive: true })
+  mkdirSync(configuredWorkspaceDir(), { recursive: true })
 
   const events = []
   const seenDurable = new Set()
@@ -211,7 +239,6 @@ export function apply(ctx, config = {}) {
 
   function installWriteApprovalPolicy() {
     if (typeof ctx.on !== 'function') return
-    const root = resolve(workspaceDir)
     const home = process.env.HOME || ''
     const mutating = /(?:^|[;&|]\s*)(?:touch|mkdir|rm|rmdir|cp|mv|tee|dd|truncate|ln|chmod|chown|printf|echo|cat\s*>|sed\s+-i|perl\s+-pi|python3?\s+-c)/i
     const writeTools = new Set(['write', 'edit', 'apply_patch', 'multi_edit', 'write_file'])
@@ -230,13 +257,13 @@ export function apply(ctx, config = {}) {
           if (!mutating.test(command) || match.length === 0) return next()
           target = match.find((candidate) => {
             const absolute = candidate.startsWith('~/') && home ? join(home, candidate.slice(2)) : resolve(candidate)
-            const relCandidate = relative(root, absolute)
+            const relCandidate = relative(resolve(configuredWorkspaceDir()), absolute)
             return relCandidate.startsWith('..') || relCandidate.startsWith('/') || relCandidate.includes(':')
           }) || ''
         }
         if (!target) return next()
         const absolute = target.startsWith('~/') && home ? join(home, target.slice(2)) : resolve(target)
-        const rel = relative(root, absolute)
+        const rel = relative(resolve(configuredWorkspaceDir()), absolute)
         if (!rel.startsWith('..') && !rel.startsWith('/') && !rel.includes(':')) return next()
         log('approval preflight ask', { tool: name, target: absolute })
         return { kind: 'ask', reason: `${name} outside workspace: ${absolute}`, displayReason: { en: `${name} outside workspace: ${absolute}`, zh: `${name} 写入工作区外文件：${absolute}` } }
@@ -539,13 +566,27 @@ export function apply(ctx, config = {}) {
         push('approval.request', { data: { id, toolName, reason, callId } })
         auditEvent('approval.requested', { approvalId: id, toolName, reason: preview(reason), callId })
         log('approval pending', { id, toolName, reason: preview(reason) })
+        // Two surfaces race for the same decision: the pet bubble (answered through
+        // POST /approval) and the DSH window's own approval panel (the rest of the
+        // waterfall). Whichever answers first wins; a request nobody answers fails
+        // closed as 'cancelled' after the deadline so the turn always settles.
+        let external
+        try { external = Promise.resolve().then(next) } catch { external = Promise.resolve('unavailable') }
         return new Promise(resolve => {
-          const timer = setTimeout(() => {
+          let settled = false
+          const finish = outcome => {
+            if (settled) return
+            settled = true
+            clearTimeout(timer)
             pendingApprovals.delete(id)
+            resolve(outcome)
+          }
+          const timer = setTimeout(() => {
             log('approval timeout', { id, toolName })
-            resolve(next())
+            finish('cancelled')
           }, 120000)
-          pendingApprovals.set(id, { resolve, timer, toolName, reason, callId })
+          pendingApprovals.set(id, { finish, toolName, reason, callId })
+          external.then(outcome => finish(outcome), () => finish('unavailable'))
         })
       } catch (error) {
         log('approval handler failed: ' + messageOf(error))
@@ -572,15 +613,41 @@ export function apply(ctx, config = {}) {
     }
   }
 
+  /**
+   * Publish the configured Bot workspace in DSH's own Workspace registry so the
+   * sidebar/top bar show it and a new session lands in it (the registry picks the
+   * workspace with the most recent session activity). Idempotent per canonical
+   * path, so repeated calls and settings changes are safe.
+   */
+  async function ensureBotWorkspace() {
+    const registry = ctx.get?.('workspaceRegistry')
+    if (!registry || typeof registry.create !== 'function') {
+      log('workspaceRegistry service unavailable; Bot workspace not registered')
+      return null
+    }
+    const target = configuredWorkspaceDir()
+    try {
+      mkdirSync(target, { recursive: true })
+      const workspace = await registry.create(target, basename(target) || 'Bot')
+      log('bot workspace ready', { path: target, id: workspace?.id === undefined ? null : String(workspace.id) })
+      return workspace
+    } catch (error) {
+      log('bot workspace registration failed: ' + messageOf(error))
+      return null
+    }
+  }
+
   async function ensureAgent() {
     if (agent) return agent
     if (typeof ctx.agents?.create !== 'function') throw new Error('ctx.agents.create is unavailable')
     const defaultSelection = ctx.get?.('agentDefaultModel')?.currentSelection?.() || null
-    const agentOptions = provider && model
-      ? { provider, model, ...(reasoningEffort ? { reasoningEffort } : {}) }
+    const configuredSelection = configuredAgentSelection()
+    const agentOptions = configuredSelection
+      ? { provider: configuredSelection.provider, model: configuredSelection.model, ...(reasoningEffort ? { reasoningEffort } : {}) }
       : defaultSelection?.provider && defaultSelection?.model
         ? { provider: defaultSelection.provider, model: defaultSelection.model, ...(reasoningEffort ? { reasoningEffort } : {}) }
         : undefined
+    await ensureBotWorkspace()
     const requestedSessionId = sessionId || randomUUID()
     const digest = await memoryDigest()
     const personaSetup = agentCtx => {
@@ -599,7 +666,7 @@ export function apply(ctx, config = {}) {
     try {
       created = await ctx.agents.create({
         sessionId: requestedSessionId,
-        meta: { cwd: workspaceDir, agentPreset: 'standard' },
+        meta: { cwd: configuredWorkspaceDir(), agentPreset: 'standard' },
         ...(agentOptions ? { agentOptions } : {}),
         setup: personaSetup,
       })
@@ -631,12 +698,12 @@ export function apply(ctx, config = {}) {
       data: {
         requestedSessionId,
         actualSessionId: sessionId,
-        cwd: String(agent.session?.header?.cwd || workspaceDir),
+        cwd: String(agent.session?.header?.cwd || configuredWorkspaceDir()),
         agentOptions: agentOptions || null,
         defaultSelection,
       },
     })
-    log('agent created', { sessionId, agentOptions: agentOptions || null, workspace: workspaceDir })
+    log('agent created', { sessionId, agentOptions: agentOptions || null, workspace: configuredWorkspaceDir() })
     return agent
   }
 
@@ -665,7 +732,15 @@ export function apply(ctx, config = {}) {
     if (String(agent.status || 'idle') === 'idle') {
       return { ok: true, cancelled: false, sessionId: sessionId || '', settledApprovals: 0 }
     }
+    const settledApprovals = pendingApprovals.size
     let cancelled = false
+    for (const [approvalId, pending] of pendingApprovals) {
+      try {
+        pending.finish('cancelled')
+        push('approval.decided', { data: { id: approvalId, outcome: 'cancelled', toolName: pending.toolName } })
+        auditEvent('approval.decided', { approvalId, outcome: 'cancelled', toolName: pending.toolName, decision: 'cancel' })
+      } catch (error) { log('approval cancel settle failed: ' + messageOf(error)) }
+    }
     try {
       agent.cancel?.({ kind: 'user' })
       cancelled = true
@@ -683,7 +758,7 @@ export function apply(ctx, config = {}) {
         push('agent.status', { sessionId, data: { status: 'idle', synthesized: true } })
       }
     }
-    return { ok: true, cancelled, sessionId: sessionId || '', settledApprovals: 0 }
+    return { ok: true, cancelled, sessionId: sessionId || '', settledApprovals: settledApprovals }
   }
 
   function health() {
@@ -708,7 +783,7 @@ export function apply(ctx, config = {}) {
         profile: String(process.env.NISSE_M1_PROFILE || process.env.DSH_PROFILE || ''),
         cwd: process.cwd(),
         bridgeDir,
-        workspaceDir,
+        workspaceDir: configuredWorkspaceDir(),
       },
       agent: {
         sessionId: sessionId || null,
@@ -806,7 +881,7 @@ export function apply(ctx, config = {}) {
           sessionId,
           actualSessionId: sessionId,
           created: true,
-          workspace: workspaceDir,
+          workspace: configuredWorkspaceDir(),
           model: { provider, model },
           reasoningEffort: '',
           personaSection: false,
@@ -820,7 +895,7 @@ export function apply(ctx, config = {}) {
       pluginVersion: VERSION,
           protocol: BRIDGE_PROTOCOL,
           persona: { name: 'Nisse（fixture）' },
-          defaultWorkspace: workspaceDir,
+          defaultWorkspace: configuredWorkspaceDir(),
           model: { provider, model },
           permissionMode: 'ask',
         })
@@ -871,10 +946,8 @@ export function apply(ctx, config = {}) {
         const id = String(body.id || '')
         const pending = pendingApprovals.get(id)
         if (!pending) return json(res, 404, { error: 'approval not pending' })
-        clearTimeout(pending.timer)
-        pendingApprovals.delete(id)
         const outcome = requested === 'reject' ? 'rejected' : 'allowed-once'
-        pending.resolve(outcome)
+        pending.finish(outcome)
         push('approval.decided', { data: { id, outcome, toolName: pending.toolName } })
         auditEvent('approval.decided', { approvalId: id, outcome, toolName: pending.toolName, decision: requested })
         log('approval decision applied', { id, decision: requested, outcome })
@@ -939,10 +1012,14 @@ export function apply(ctx, config = {}) {
       dshHome: String(process.env.DSH_HOME || ''),
       home: String(process.env.HOME || ''),
       profile: String(process.env.DSH_PROFILE || ''),
-      workspaceDir,
+      workspaceDir: configuredWorkspaceDir(),
     }, null, 2))
     try { chmodSync(bridgeFile, 0o600) } catch { /* ignore */ }
-    log('bridge listening on 127.0.0.1:' + address.port, { bridgeFile, workspaceDir })
+    log('bridge listening on 127.0.0.1:' + address.port, { bridgeFile, workspaceDir: configuredWorkspaceDir() })
+  })
+
+  ctx.inject(['workspaceRegistry'], () => {
+    void ensureBotWorkspace()
   })
 
   ctx.effect?.(() => () => {

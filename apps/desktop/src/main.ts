@@ -3,12 +3,12 @@ import { WINDOWS_TITLEBAR_HEIGHT } from './windows-layout.ts'
 /** Electron shell: desktop project ownership, custom protocol, windows, and lifecycle. */
 
 import { readFile, writeFile } from 'node:fs/promises'
-import { rmSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
-import { startBotConfigServer } from './bot-config-server.ts'
+import { BOT_CONFIG_PORT, startBotConfigServer } from './bot-config-server.ts'
 import { spawn } from 'node:child_process'
-import { BotRuntime } from './bot-runtime.ts'
+import { BotRuntime, type BotRuntimeConfig } from './bot-runtime.ts'
 import { fileURLToPath } from 'node:url'
 import {
   app,
@@ -336,8 +336,28 @@ async function main(): Promise<void> {
   botRuntime.prepare()
   const botConfigServer = await startBotConfigServer(resolveDshHome(), undefined, {
     status: () => botRuntime.status(),
-    onConfigSaved: () => { void botRuntime.restart() },
+    onConfigSaved: (config) => {
+      const previous = botRuntime.readConfig()
+      // The LLM route and the Bot workspace are composed into the DSH profile at
+      // Host start, so a change to either needs one Host restart. Voice-only edits
+      // just restart the gateway. Relaunch once instead of leaving a stale Host.
+      const hostRestart = previous.llm?.provider !== config.llm.provider
+        || previous.llm?.model !== config.llm.model
+        || previous.llm?.baseUrl !== config.llm.baseUrl
+        || String(previous.agent?.workspace || '') !== String(config.agent.workspace || '')
+      void botRuntime.applyConfig(config).then(() => {
+        if (!hostRestart || process.env.WHALEGIRL_NO_RELAUNCH === '1') return
+        setTimeout(() => { app.relaunch(); app.quit() }, 800)
+      })
+    },
     onRestart: () => botRuntime.restart(),
+    onPickDirectory: async () => {
+      const pick = { title: '选择 Bot 工作区', properties: ['openDirectory', 'createDirectory'] } as const
+      const result = mainWindow === undefined
+        ? await dialog.showOpenDialog({ ...pick, properties: [...pick.properties] })
+        : await dialog.showOpenDialog(mainWindow, { ...pick, properties: [...pick.properties] })
+      return result.canceled ? null : (result.filePaths[0] ?? null)
+    },
     onToggleMain: () => {
       const window = mainWindow ?? createMainWindow()
       if (window.isVisible() && window.isFocused()) { window.minimize(); return 'minimized' }
@@ -364,25 +384,65 @@ async function main(): Promise<void> {
   const petElectron = process.env.WHALEGIRL_PET_ELECTRON || '/Users/zhengzhi/Documents/projects/nisse/research/qwen-audio-agent/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'
   const voiceHome = process.env.WHALEGIRL_VOICE_HOME || '/tmp/nisse-m1/voice'
   const petUserData = process.env.WHALEGIRL_PET_USER_DATA || '/tmp/nisse-pet2/userdata'
+  const petDebugPort = process.env.WHALEGIRL_PET_DEBUG_PORT || ''
+  const botConfigPort = String(BOT_CONFIG_PORT)
+  /**
+   * Publish the Bot settings the Body Runtime consumes (wake word) into the pet's
+   * client-settings file. The pet has no settings window of its own any more, so
+   * this is the only writer and it must not clobber unrelated peer-owned keys.
+   */
+  const applyPetWakeWord = (config: BotRuntimeConfig): void => {
+    const wakeWord = String(config.voice?.wakeWord || '').trim()
+    if (wakeWord === '') return
+    mkdirSync(petUserData, { recursive: true, mode: 0o700 })
+    const settingsFile = join(petUserData, 'settings.env')
+    let current = ''
+    try { current = readFileSync(settingsFile, 'utf8') } catch {}
+    const managed = new Map([
+      ['QWEN_AUDIO_WAKE_WORD_ENABLED', 'true'],
+      ['QWEN_AUDIO_WAKE_WORD_PHRASE', wakeWord],
+    ])
+    const kept = current.split('\n').filter((line) => {
+      const key = line.split('=')[0]?.trim() ?? ''
+      return key !== '' && !managed.has(key) && !line.startsWith('# Whalegirl Bot')
+    })
+    const next = [
+      '# Whalegirl Bot: written from DSH Settings -> Bot voice.wakeWord before each launch.',
+      ...[...managed].map(([key, value]) => `${key}=${value}`),
+      ...kept,
+    ].filter(line => line !== '')
+    writeFileSync(settingsFile, next.join('\n') + '\n', { mode: 0o600 })
+  }
   let petProcess: ReturnType<typeof spawn> | null = null
-  const startDeskPet = (): void => {
+  const startDeskPet = (config: BotRuntimeConfig): void => {
     if (petProcess) return
     for (const name of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
       try { rmSync(join(petUserData, name), { force: true }) } catch {}
     }
+    applyPetWakeWord(config)
+    const petEnvironment: NodeJS.ProcessEnv = {
+      ...process.env,
+      HOME: process.env.WHALEGIRL_PET_HOME || '/tmp/nisse-m1/home',
+      XDG_CONFIG_HOME: `${voiceHome}/config`,
+      XDG_DATA_HOME: `${voiceHome}/data`,
+      XDG_STATE_HOME: `${voiceHome}/state`,
+      QWEN_AUDIO_AGENT_URL: `http://127.0.0.1:${String(botRuntime.port)}`,
+      AGENT_PROTOCOL: 'none',
+      NISSE_BRIDGE_ONLY: '1',
+      NISSE_BRIDGE_FILE: join(resolveDshHome(), 'bot', 'bridge.json'),
+      NISSE_SHELL_CONTROL_URL: `http://127.0.0.1:${botConfigPort}`,
+      NISSE_BUBBLE_PORT: '59102',
+    }
+    // A pet Electron must run as an application, never as this shell's Node child.
+    delete petEnvironment.ELECTRON_RUN_AS_NODE
+    delete petEnvironment.ELECTRON_NO_ATTACH_CONSOLE
     try {
-      petProcess = spawn(petElectron, [petApp, `--user-data-dir=${petUserData}`], {
-        env: {
-          ...process.env,
-          HOME: process.env.WHALEGIRL_PET_HOME || '/tmp/nisse-m1/home',
-          XDG_CONFIG_HOME: `${voiceHome}/config`,
-          XDG_DATA_HOME: `${voiceHome}/data`,
-          XDG_STATE_HOME: `${voiceHome}/state`,
-          QWEN_AUDIO_AGENT_URL: 'http://127.0.0.1:59002',
-          AGENT_PROTOCOL: 'none',
-          NISSE_BRIDGE_ONLY: '1',
-          NISSE_BRIDGE_FILE: join(resolveDshHome(), 'bot', 'bridge.json'),
-        },
+      petProcess = spawn(petElectron, [
+        petApp,
+        `--user-data-dir=${petUserData}`,
+        ...(petDebugPort === '' ? [] : [`--remote-debugging-port=${petDebugPort}`]),
+      ], {
+        env: petEnvironment,
         cwd: process.env.WHALEGIRL_PET_CWD || '/Users/zhengzhi/Documents/projects/nisse',
         stdio: ['ignore', 'ignore', 'ignore'],
       })
@@ -390,7 +450,7 @@ async function main(): Promise<void> {
       app.on('will-quit', () => { try { petProcess?.kill('SIGTERM') } catch {} })
     } catch (error) { console.warn('deskpet spawn:', error) }
   }
-  void botRuntime.start().then((status) => { if (status.gateway) startDeskPet() })
+  void botRuntime.start().then((status) => { if (status.gateway) startDeskPet(botRuntime.readConfig()) })
   // Dock and Finder launches inherit only launchd's environment; every Host shares one login-shell read.
   const loginShellRead = new AbortController()
   // The probe runs in its own process group, which outlives Desktop unless the read is aborted.
