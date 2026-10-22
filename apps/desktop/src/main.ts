@@ -4,6 +4,8 @@ import { WINDOWS_TITLEBAR_HEIGHT } from './windows-layout.ts'
 
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import { startBotConfigServer } from './bot-config-server.ts'
 import { fileURLToPath } from 'node:url'
 import {
   app,
@@ -327,6 +329,11 @@ async function main(): Promise<void> {
     : join(process.resourcesPath, 'runtime', 'primary-runtime')
   const activeProject = paths.profile
   const manager = new DesktopProjectManager(paths, resources)
+  const botConfigServer = await startBotConfigServer(resolveDshHome()).catch((error: unknown) => {
+    console.warn('bot config server:', error)
+    return undefined
+  })
+  app.on('will-quit', () => { void botConfigServer?.close() })
   // Dock and Finder launches inherit only launchd's environment; every Host shares one login-shell read.
   const loginShellRead = new AbortController()
   // The probe runs in its own process group, which outlives Desktop unless the read is aborted.

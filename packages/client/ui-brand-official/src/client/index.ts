@@ -3,6 +3,8 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+import { BotSettingsSection } from './BotSettings.tsx'
 import { OfficialBrandMark, OfficialBrandName } from './Brand.tsx'
 
 /** Required service: the UI slot registry. */
@@ -23,4 +25,6 @@ export function apply(ctx: ClientContext): void {
     }))
   ctx.slots.inject('conversation.hero.brand.mark', () =>
     ctx.slots.register({ name: 'conversation.hero.brand.mark' }, OfficialBrandMark))
+  ctx.slots.inject('settings.section', () =>
+    ctx.slots.register({ name: 'settings.section', id: 'bot', order: 30, label: () => 'Bot' }, BotSettingsSection as never))
 }
