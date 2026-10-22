@@ -29,6 +29,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 export const name = 'nisse-host-integration'
 export const inject = ['agents', 'permissionPresets', 'approval']
 
+console.log('[nisse-host-integration] module loaded from ' + import.meta.url)
+
 const CONTRACT_EVENT_MAP = {
   'user.message': 'turn.started',
   'assistant.delta': 'turn.delta',
