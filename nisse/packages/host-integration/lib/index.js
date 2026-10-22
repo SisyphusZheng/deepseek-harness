@@ -510,7 +510,7 @@ export function apply(ctx, config = {}) {
     // and only for the read-only model-facing `read` tool. Everything else is
     // delegated (fail-closed as in production). The durable approval/asked and
     // approval/decided events are recorded through the session/event observer.
-    ctx.on('approval/request', (req, next) => {
+    const approvalHandler = (req, next) => {
       try {
         const sid = req?.agent?.session?.id
         if (!matchesSession(sid)) return next()
@@ -543,7 +543,9 @@ export function apply(ctx, config = {}) {
         log('approval handler failed: ' + messageOf(error))
         return next()
       }
-    })
+    }
+    ctx.on('approval/request', approvalHandler)
+    ctx.on('approval/asked', approvalHandler)
   } else {
     log('ctx.on unavailable; durable events will only be backfilled on idle')
   }
