@@ -84,7 +84,7 @@ body{margin:0;padding:24px 28px;font-size:13px}h1{font-size:18px;margin:0 0 2px}
 <h1>Bot</h1><div class="sub">管理语音前台、后台 Agent、Bot 人格与应用程序</div>
 <div class="tabs" id="tabs"></div>
 <div id="panels"></div>
-<div class="actions"><button id="save">保存</button><span class="status" id="status"></span></div>
+<div class="actions"><button id="save">保存</button><button id="restart" style="background:#fff;color:#18181b">重启语音</button><span class="status" id="status"></span></div><div class="hint" id="runtime" style="margin-top:10px"></div>
 <script>
 const schema=[
   {id:'voice',label:'语音前台',fields:[['provider','供应商','text'],['baseUrl','服务地址','text'],['apiKey','API Key','password'],['model','模型','text'],['voice','音色','text'],['wakeWord','唤醒词','text']]},
@@ -117,17 +117,36 @@ function render(){
 }
 async function load(){const r=await fetch('/bot/config');config=(await r.json()).config;render()}
 document.getElementById('save').onclick=async()=>{const r=await fetch('/bot/config',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify(config)});const j=await r.json();status.textContent=r.ok?'已保存':'保存失败';if(r.ok)config=j.config};
+document.getElementById('restart').onclick=async()=>{status.textContent='重启中…';const r=await fetch('/bot/restart',{method:'POST'});const j=await r.json();status.textContent=r.ok?'已重启':'重启失败';document.getElementById('runtime').textContent=JSON.stringify(j.status)};
+async function poll(){try{const s=await (await fetch('/bot/status')).json();document.getElementById('runtime').textContent=s.status?('语音网关：'+(s.status.gateway?'运行中 pid '+s.status.pid:'未运行')+' · '+s.status.voiceDir):'语音网关：未配置'}catch{}}
+poll();setInterval(poll,3000);
 load();
 </script></body></html>`
 }
 
-export async function startBotConfigServer(dshHome: string, port = BOT_CONFIG_PORT): Promise<{ close: () => Promise<void>; port: number }> {
+export interface BotConfigHooks {
+  status?: () => unknown
+  onConfigSaved?: (config: BotConfig) => void | Promise<void>
+  onRestart?: () => unknown | Promise<unknown>
+}
+
+export async function startBotConfigServer(
+  dshHome: string,
+  port = BOT_CONFIG_PORT,
+  hooks: BotConfigHooks = {},
+): Promise<{ close: () => Promise<void>; port: number }> {
   const configDir = join(dshHome, 'bot')
   const server: Server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url || '/', 'http://127.0.0.1')
       if (url.pathname === '/bot/settings') {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end(page()); return
+      }
+      if (url.pathname === '/bot/status' && req.method === 'GET') {
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: true, status: hooks.status?.() ?? null })); return
+      }
+      if (url.pathname === '/bot/restart' && req.method === 'POST') {
+        res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: true, status: await hooks.onRestart?.() ?? null })); return
       }
       if (url.pathname === '/bot/config' && req.method === 'GET') {
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: true, config: await readConfig(configDir) })); return
@@ -136,6 +155,7 @@ export async function startBotConfigServer(dshHome: string, port = BOT_CONFIG_PO
         const chunks: Buffer[] = []
         for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
         const config = await writeConfig(configDir, JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'))
+        await hooks.onConfigSaved?.(config)
         res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: true, config })); return
       }
       res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: 'not found' }))
