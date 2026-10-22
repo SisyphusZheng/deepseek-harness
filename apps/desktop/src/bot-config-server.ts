@@ -1,4 +1,4 @@
-/** Local Bot settings/config service for the WhaleGirl Bot desktop shell. */
+/** Local Bot settings/config service for the WhaleGirlBot desktop shell. */
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -32,7 +32,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   voice: { provider: 'dashscope', baseUrl: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime', apiKey: '', model: 'qwen-audio-3.0-realtime-plus', voice: 'longanxiaoxin', wakeWord: '' },
   llm: { provider: 'opencode-go', model: 'deepseek-v4.1-flash', baseUrl: '', apiKey: '' },
   agent: { mode: 'dsh', workspace: '', session: '' },
-  persona: { name: 'WhaleGirl Bot', personality: '自然、可靠，有一点鲸鱼娘的温柔与俏皮，但不过度卖萌；有自己的判断，不刻意迎合；做事干脆。', instructions: '事实与执行结果必须来自 DSH。' },
+  persona: { name: 'WhaleGirlBot', personality: '自然、可靠，有一点鲸鱼娘的温柔与俏皮，但不过度卖萌；有自己的判断，不刻意迎合；做事干脆。', instructions: '事实与执行结果必须来自 DSH。' },
   app: { autoStart: true, keepRunning: true },
 }
 

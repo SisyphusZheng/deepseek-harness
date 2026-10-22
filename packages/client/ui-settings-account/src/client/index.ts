@@ -44,7 +44,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 export const inject = ['slots', 'locale', 'remote', 'remote.account', 'remote.session', 'theme', 'configForms']
 /** Register account UI in Desktop and plain Web clients. @param ctx - client plugin context. */
 export function apply(ctx: Context): void {
-  // WhaleGirl Bot internal fan build: local BYOK only, no account/login UI.
+  // WhaleGirlBot internal fan build: local BYOK only, no account/login UI.
   // Keep the upstream registration body in a separate (unexported from apply)
   // function so a future account mode can opt back in; this build does not call it.
   void ctx

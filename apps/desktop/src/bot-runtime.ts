@@ -1,4 +1,4 @@
-/** Supervises the optional voice gateway child owned by the WhaleGirl Bot desktop shell. */
+/** Supervises the optional voice gateway child owned by the WhaleGirlBot desktop shell. */
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'

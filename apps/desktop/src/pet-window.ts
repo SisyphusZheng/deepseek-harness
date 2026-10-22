@@ -1,4 +1,4 @@
-/** Transparent WhaleGirl Bot pet window inside the desktop shell (Phase B). */
+/** Transparent WhaleGirlBot pet window inside the desktop shell (Phase B). */
 import { BrowserWindow, ipcMain, screen } from 'electron'
 import { join } from 'node:path'
 
@@ -7,7 +7,7 @@ export function createPetWindow(options: { resources: string; onOpenMain: () => 
   const pet = new BrowserWindow({
     width: 220, height: 280, x: width - 260, y: height - 340,
     frame: false, transparent: true, resizable: false, alwaysOnTop: true,
-    skipTaskbar: true, hasShadow: false, title: 'WhaleGirl Bot',
+    skipTaskbar: true, hasShadow: false, title: 'WhaleGirlBot',
     webPreferences: {
       preload: join(options.resources, 'pet-preload.cjs'),
       contextIsolation: true, sandbox: true, nodeIntegration: false,

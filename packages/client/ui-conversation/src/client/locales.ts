@@ -454,7 +454,7 @@ export const en = {
   'settings.enter.description': 'What Enter and the Send button do while the agent is running; Cmd/Ctrl+Enter uses the other behavior',
   'settings.enter.queue': 'Queue',
   'settings.enter.steer': 'Steer',
-  'hero.headline': 'Explore with WhaleGirl Bot',
+  'hero.headline': 'Explore with WhaleGirlBot',
   'hero.preview': 'alpha',
   'hero.chooseWorkspace': 'Choose workspace',
   'session.hierarchy': 'Session hierarchy',
