@@ -15,6 +15,19 @@ export function createPetWindow(options: { resources: string; onOpenMain: () => 
   })
   ipcMain.removeAllListeners('pet:open-main')
   ipcMain.on('pet:open-main', () => options.onOpenMain())
+  let dragOrigin: { x: number; y: number; wx: number; wy: number } | null = null
+  ipcMain.removeAllListeners('pet:drag-start')
+  ipcMain.removeAllListeners('pet:drag-move')
+  ipcMain.removeAllListeners('pet:drag-end')
+  ipcMain.on('pet:drag-start', (_event, point: { x: number; y: number }) => {
+    const bounds = pet.getBounds()
+    dragOrigin = { x: point.x, y: point.y, wx: bounds.x, wy: bounds.y }
+  })
+  ipcMain.on('pet:drag-move', (_event, point: { x: number; y: number }) => {
+    if (!dragOrigin) return
+    pet.setPosition(Math.round(dragOrigin.wx + point.x - dragOrigin.x), Math.round(dragOrigin.wy + point.y - dragOrigin.y))
+  })
+  ipcMain.on('pet:drag-end', () => { dragOrigin = null })
   void pet.loadFile(join(options.resources, 'pet.html'))
   return pet
 }

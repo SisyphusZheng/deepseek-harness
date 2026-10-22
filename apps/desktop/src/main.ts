@@ -331,7 +331,8 @@ async function main(): Promise<void> {
     : join(process.resourcesPath, 'runtime', 'primary-runtime')
   const activeProject = paths.profile
   const manager = new DesktopProjectManager(paths, resources)
-  const botRuntime = new BotRuntime(resolveDshHome())
+  const botRuntime = new BotRuntime(resolveDshHome(), process.resourcesPath)
+  botRuntime.prepare()
   const botConfigServer = await startBotConfigServer(resolveDshHome(), undefined, {
     status: () => botRuntime.status(),
     onConfigSaved: () => { void botRuntime.restart() },
@@ -341,6 +342,7 @@ async function main(): Promise<void> {
     return undefined
   })
   app.on('will-quit', () => { void botRuntime.stop(); void botConfigServer?.close() })
+  void botRuntime.start()
   // Dock and Finder launches inherit only launchd's environment; every Host shares one login-shell read.
   const loginShellRead = new AbortController()
   // The probe runs in its own process group, which outlives Desktop unless the read is aborted.
@@ -363,6 +365,7 @@ async function main(): Promise<void> {
   app.whenReady().then(() => {
     petWindow = createPetWindow({ resources: process.resourcesPath, onOpenMain: () => {
       const window = mainWindow ?? createMainWindow()
+      if (window.isVisible() && window.isFocused()) { window.minimize(); return }
       window.show(); window.focus()
     } })
     app.on('will-quit', () => { try { petWindow?.destroy() } catch {} })
