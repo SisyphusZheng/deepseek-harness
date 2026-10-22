@@ -575,6 +575,11 @@ export function apply(ctx, config = {}) {
     const digest = await memoryDigest()
     const personaSetup = agentCtx => {
       try {
+        log('agent setup callback', { hasOn: typeof agentCtx?.on, hasAnswerer: Boolean(approvalAnswerer) })
+        if (typeof agentCtx?.on === 'function' && approvalAnswerer) {
+          agentCtx.on('approval/request', approvalAnswerer)
+          log('approval answerer registered in setup')
+        }
         const systemPrompt = agentCtx?.systemPrompt
         if (typeof systemPrompt?.section === 'function') {
           systemPrompt.section({ name: 'nisse-persona', order: 120, text: personaText(persona), interpolate: false })
