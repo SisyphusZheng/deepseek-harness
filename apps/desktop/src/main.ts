@@ -332,6 +332,13 @@ async function main(): Promise<void> {
     : join(process.resourcesPath, 'runtime', 'primary-runtime')
   const activeProject = paths.profile
   const manager = new DesktopProjectManager(paths, resources)
+  if (development) {
+    // The packaged application carries these beside app.asar; a workspace launch
+    // points at the same first-party sources so dev behaves like the product.
+    const repositoryRoot = join(app.getAppPath(), '..', '..')
+    process.env.WHALEGIRL_HOST_INTEGRATION_DIR ||= join(repositoryRoot, 'nisse', 'packages', 'host-integration')
+    process.env.WHALEGIRL_LLM_ENTRY_PATH ||= join(repositoryRoot, 'packages', 'llm', 'llm', 'lib', 'index.js')
+  }
   const botRuntime = new BotRuntime(resolveDshHome(), process.resourcesPath)
   botRuntime.prepare()
   const botConfigServer = await startBotConfigServer(resolveDshHome(), undefined, {
@@ -345,6 +352,10 @@ async function main(): Promise<void> {
         || previous.llm?.model !== config.llm.model
         || previous.llm?.baseUrl !== config.llm.baseUrl
         || String(previous.agent?.workspace || '') !== String(config.agent.workspace || '')
+        || previous.persona?.name !== config.persona.name
+        || previous.persona?.personality !== config.persona.personality
+        || previous.persona?.tone !== config.persona.tone
+        || previous.persona?.instructions !== config.persona.instructions
       void botRuntime.applyConfig(config).then(() => {
         if (!hostRestart || process.env.WHALEGIRL_NO_RELAUNCH === '1') return
         setTimeout(() => { app.relaunch(); app.quit() }, 800)

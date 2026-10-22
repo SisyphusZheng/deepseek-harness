@@ -20,7 +20,7 @@
 // It runs in a throw-away DSH host under /tmp/nisse-m1 with its own
 // DSH_HOME/HOME; it never reads or writes ~/.dsh, ~/Documents/Nisse, or the
 // installed Nisse/DSH profile.
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { basename, dirname, join, relative, resolve } from 'node:path'
@@ -49,10 +49,10 @@ const FIXTURE = 'nisse-host-integration'
 const VERSION = '0.1.0'
 const CONTRACT_VERSION = 'v0'
 const DEFAULT_PERSONA = {
-  name: 'Nisse',
+  name: 'Nisse（家灵）',
   personality: '自然、可靠，有一点鲸鱼娘的温柔与俏皮，但不过度卖萌；有自己的判断，不刻意迎合；做事干脆。',
   tone: '简短、清楚、不啰嗦；必要时先给结论。',
-  instructions: '事实性回答与任务结果必须来自 DSH；不编造执行结果。',
+  instructions: '事实与执行结果必须来自 DSH；不编造执行结果。',
 }
 function normalizePersona(input) {
   const p = input && typeof input === 'object' ? input : {}
@@ -199,6 +199,40 @@ export function apply(ctx, config = {}) {
     if (configured) return resolve(configured)
     return fallbackWorkspaceDir
   }
+  /**
+   * The Bot workspace spelled the way DSH's workspace registry stores it (real path).
+   * A session created with a non-canonical spelling (e.g. /tmp vs /private/tmp on
+   * macOS) is not grouped under its workspace, so every consumer uses this value.
+   */
+  function canonicalWorkspaceDir() {
+    const dir = configuredWorkspaceDir()
+    try { mkdirSync(dir, { recursive: true }); return realpathSync(dir) } catch { return dir }
+  }
+  /** The persona from DSH Settings -> Bot (name/personality/tone/instructions), falling back to the file/default. */
+  function configuredPersona() {
+    const configured = readBotConfig()?.persona
+    return configured && typeof configured === 'object' ? normalizePersona(configured) : persona
+  }
+  const botSessionFile = join(bridgeDir, 'session.json')
+  /** The durable Bot conversation: one DSH session reused across launches while the Bot workspace is unchanged. */
+  function readBotSession() {
+    try {
+      const parsed = JSON.parse(readFileSync(botSessionFile, 'utf8'))
+      return parsed && typeof parsed === 'object' ? parsed : null
+    } catch { return null }
+  }
+  function persistBotSession(id, workspace) {
+    try {
+      writeFileSync(botSessionFile, JSON.stringify({ sessionId: id, workspace }, null, 2) + '\n')
+      chmodSync(botSessionFile, 0o600)
+    } catch (error) { log('bot session persist failed: ' + messageOf(error)) }
+  }
+  /** Resume the recorded Bot conversation only while it belongs to the configured workspace. */
+  function persistedSessionId() {
+    const recorded = readBotSession()
+    if (!recorded || typeof recorded.sessionId !== 'string' || recorded.sessionId === '') return ''
+    return recorded.workspace === canonicalWorkspaceDir() ? recorded.sessionId : ''
+  }
   /** Bot-scoped LLM selection: settings llm section wins, then profile config, then the DSH default model. */
   function configuredAgentSelection() {
     const llm = readBotConfig()?.llm
@@ -210,7 +244,7 @@ export function apply(ctx, config = {}) {
   }
 
   mkdirSync(bridgeDir, { recursive: true })
-  mkdirSync(configuredWorkspaceDir(), { recursive: true })
+  mkdirSync(canonicalWorkspaceDir(), { recursive: true })
 
   const events = []
   const seenDurable = new Set()
@@ -257,13 +291,13 @@ export function apply(ctx, config = {}) {
           if (!mutating.test(command) || match.length === 0) return next()
           target = match.find((candidate) => {
             const absolute = candidate.startsWith('~/') && home ? join(home, candidate.slice(2)) : resolve(candidate)
-            const relCandidate = relative(resolve(configuredWorkspaceDir()), absolute)
+            const relCandidate = relative(canonicalWorkspaceDir(), absolute)
             return relCandidate.startsWith('..') || relCandidate.startsWith('/') || relCandidate.includes(':')
           }) || ''
         }
         if (!target) return next()
         const absolute = target.startsWith('~/') && home ? join(home, target.slice(2)) : resolve(target)
-        const rel = relative(resolve(configuredWorkspaceDir()), absolute)
+        const rel = relative(canonicalWorkspaceDir(), absolute)
         if (!rel.startsWith('..') && !rel.startsWith('/') && !rel.includes(':')) return next()
         log('approval preflight ask', { tool: name, target: absolute })
         return { kind: 'ask', reason: `${name} outside workspace: ${absolute}`, displayReason: { en: `${name} outside workspace: ${absolute}`, zh: `${name} 写入工作区外文件：${absolute}` } }
@@ -619,21 +653,41 @@ export function apply(ctx, config = {}) {
    * workspace with the most recent session activity). Idempotent per canonical
    * path, so repeated calls and settings changes are safe.
    */
+  let botWorkspace = null
+
   async function ensureBotWorkspace() {
     const registry = ctx.get?.('workspaceRegistry')
     if (!registry || typeof registry.create !== 'function') {
       log('workspaceRegistry service unavailable; Bot workspace not registered')
       return null
     }
-    const target = configuredWorkspaceDir()
+    const target = canonicalWorkspaceDir()
     try {
       mkdirSync(target, { recursive: true })
       const workspace = await registry.create(target, basename(target) || 'Bot')
+      botWorkspace = workspace
       log('bot workspace ready', { path: target, id: workspace?.id === undefined ? null : String(workspace.id) })
       return workspace
     } catch (error) {
       log('bot workspace registration failed: ' + messageOf(error))
       return null
+    }
+  }
+
+  /** Attach the persisted Bot conversation to its workspace at startup so it is
+   *  already listed under the Bot workspace before the first voice turn. */
+  async function attachPersistedSession() {
+    const recorded = readBotSession()
+    if (!recorded || typeof recorded.sessionId !== 'string' || recorded.sessionId === '') return
+    if (recorded.workspace !== canonicalWorkspaceDir()) return
+    try {
+      const workspace = botWorkspace || await ensureBotWorkspace()
+      if (workspace && typeof workspace.attachSession === 'function') {
+        await workspace.attachSession(recorded.sessionId)
+        log('bot session restored in workspace', { sessionId: recorded.sessionId })
+      }
+    } catch (error) {
+      log('bot session restore failed: ' + messageOf(error))
     }
   }
 
@@ -648,13 +702,13 @@ export function apply(ctx, config = {}) {
         ? { provider: defaultSelection.provider, model: defaultSelection.model, ...(reasoningEffort ? { reasoningEffort } : {}) }
         : undefined
     await ensureBotWorkspace()
-    const requestedSessionId = sessionId || randomUUID()
+    const requestedSessionId = sessionId || persistedSessionId() || randomUUID()
     const digest = await memoryDigest()
     const personaSetup = agentCtx => {
       try {
         const systemPrompt = agentCtx?.systemPrompt
         if (typeof systemPrompt?.section === 'function') {
-          systemPrompt.section({ name: 'nisse-persona', order: 120, text: personaText(persona), interpolate: false })
+          systemPrompt.section({ name: 'nisse-persona', order: 120, text: personaText(configuredPersona()), interpolate: false })
           if (digest) systemPrompt.section({ name: 'nisse-memory', order: 130, text: '长期记忆摘要：\n' + digest, interpolate: false })
         }
 
@@ -666,7 +720,7 @@ export function apply(ctx, config = {}) {
     try {
       created = await ctx.agents.create({
         sessionId: requestedSessionId,
-        meta: { cwd: configuredWorkspaceDir(), agentPreset: 'standard' },
+        meta: { cwd: canonicalWorkspaceDir(), agentPreset: 'standard' },
         ...(agentOptions ? { agentOptions } : {}),
         setup: personaSetup,
       })
@@ -687,6 +741,20 @@ export function apply(ctx, config = {}) {
     handle = created
     agent = created.agent
     sessionId = String(agent.session.id)
+    persistBotSession(sessionId, canonicalWorkspaceDir())
+    // Membership: a session created directly through the Agent factory is not
+    // attached to the Workspace record by the Workspace controller, so attach it
+    // here; without this the Bot conversation would surface under the ungrouped
+    // section even though its cwd is the Bot workspace.
+    try {
+      const workspace = botWorkspace || await ensureBotWorkspace()
+      if (workspace && typeof workspace.attachSession === 'function') {
+        await workspace.attachSession(sessionId)
+        log('bot session attached to workspace', { sessionId, workspace: String(workspace.id || '') })
+      }
+    } catch (error) {
+      log('bot session workspace attach failed: ' + messageOf(error))
+    }
 
     try {
       const presets = ctx.permissionPresets || ctx.get?.('permissionPresets')
@@ -698,12 +766,12 @@ export function apply(ctx, config = {}) {
       data: {
         requestedSessionId,
         actualSessionId: sessionId,
-        cwd: String(agent.session?.header?.cwd || configuredWorkspaceDir()),
+        cwd: String(agent.session?.header?.cwd || canonicalWorkspaceDir()),
         agentOptions: agentOptions || null,
         defaultSelection,
       },
     })
-    log('agent created', { sessionId, agentOptions: agentOptions || null, workspace: configuredWorkspaceDir() })
+    log('agent created', { sessionId, agentOptions: agentOptions || null, workspace: canonicalWorkspaceDir() })
     return agent
   }
 
@@ -783,7 +851,7 @@ export function apply(ctx, config = {}) {
         profile: String(process.env.NISSE_M1_PROFILE || process.env.DSH_PROFILE || ''),
         cwd: process.cwd(),
         bridgeDir,
-        workspaceDir: configuredWorkspaceDir(),
+        workspaceDir: canonicalWorkspaceDir(),
       },
       agent: {
         sessionId: sessionId || null,
@@ -881,7 +949,7 @@ export function apply(ctx, config = {}) {
           sessionId,
           actualSessionId: sessionId,
           created: true,
-          workspace: configuredWorkspaceDir(),
+          workspace: canonicalWorkspaceDir(),
           model: { provider, model },
           reasoningEffort: '',
           personaSection: false,
@@ -894,8 +962,8 @@ export function apply(ctx, config = {}) {
       contractVersion: CONTRACT_VERSION,
       pluginVersion: VERSION,
           protocol: BRIDGE_PROTOCOL,
-          persona: { name: 'Nisse（fixture）' },
-          defaultWorkspace: configuredWorkspaceDir(),
+          persona: configuredPersona(),
+          defaultWorkspace: canonicalWorkspaceDir(),
           model: { provider, model },
           permissionMode: 'ask',
         })
@@ -1012,14 +1080,14 @@ export function apply(ctx, config = {}) {
       dshHome: String(process.env.DSH_HOME || ''),
       home: String(process.env.HOME || ''),
       profile: String(process.env.DSH_PROFILE || ''),
-      workspaceDir: configuredWorkspaceDir(),
+      workspaceDir: canonicalWorkspaceDir(),
     }, null, 2))
     try { chmodSync(bridgeFile, 0o600) } catch { /* ignore */ }
-    log('bridge listening on 127.0.0.1:' + address.port, { bridgeFile, workspaceDir: configuredWorkspaceDir() })
+    log('bridge listening on 127.0.0.1:' + address.port, { bridgeFile, workspaceDir: canonicalWorkspaceDir() })
   })
 
   ctx.inject(['workspaceRegistry'], () => {
-    void ensureBotWorkspace()
+    void ensureBotWorkspace().then(() => attachPersistedSession())
   })
 
   ctx.effect?.(() => () => {

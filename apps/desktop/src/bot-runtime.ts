@@ -17,6 +17,7 @@ export interface BotRuntimeConfig {
   voice?: { provider?: string; baseUrl?: string; apiKey?: string; model?: string; voice?: string; wakeWord?: string }
   llm?: { provider?: string; model?: string; baseUrl?: string; apiKey?: string }
   agent?: { mode?: string; workspace?: string; session?: string }
+  persona?: { name?: string; personality?: string; tone?: string; instructions?: string }
 }
 
 /** Environment variable names each supported LLM provider route reads its key from. */
@@ -146,7 +147,7 @@ export class BotRuntime {
     const profile = join(this.dshHome, 'profiles', 'desktop')
     const modules = join(profile, 'node_modules')
     mkdirSync(modules, { recursive: true })
-    const bundle = join(this.resourcesPath, 'host-integration')
+    const bundle = String(process.env.WHALEGIRL_HOST_INTEGRATION_DIR || '').trim() || join(this.resourcesPath, 'host-integration')
     if (!existsSync(bundle)) { this.lastError = 'host-integration bundle missing'; return }
     const link = join(modules, 'nisse-host-integration')
     try { rmSync(link, { recursive: true, force: true }) } catch {}
@@ -159,7 +160,9 @@ export class BotRuntime {
     for (const name of ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'nisse-host-integration']) if (!bundles.includes(name)) bundles.push(name)
     profileConfig.bundles = bundles; dsh.profile = profileConfig; manifest.dsh = dsh
     writeFileSync(join(profile, 'package.json'), JSON.stringify(manifest, null, 2) + '\n')
-    const llm = join(this.resourcesPath, 'app.asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh-llm', 'lib', 'index.js')
+    const packagedLlm = join(this.resourcesPath, 'app.asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh-llm', 'lib', 'index.js')
+    const fallbackLlm = String(process.env.WHALEGIRL_LLM_ENTRY_PATH || '').trim()
+    const llm = existsSync(packagedLlm) ? packagedLlm : (fallbackLlm !== '' ? fallbackLlm : packagedLlm)
     process.env.NISSE_DSH_LLM_ENTRY = llm
     applyLlmEnvironment(config)
     const patchFile = join(profile, 'cordis.patch.yml')
@@ -219,7 +222,7 @@ export class BotRuntime {
     try {
       this.child = spawn(node, ['cli/bin/qwenaudio.mjs', 'gateway'], {
         cwd: this.voiceDir,
-        env: { ...process.env, ...(apiKey ? { DASHSCOPE_API_KEY: apiKey } : {}), DSH_DESKTOP_NODE_EXECUTABLE: process.execPath, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_DATA_HOME: join(home, '.local/share'), XDG_STATE_HOME: join(home, '.local/state'), PORT: String(this.port), AGENT_PROTOCOL: 'none', NISSE_ROUTE_C: '1', NISSE_BRIDGE_ONLY: '1', NISSE_BRIDGE_FILE: bridge },
+        env: { ...process.env, ...(apiKey ? { DASHSCOPE_API_KEY: apiKey } : {}), NISSE_BOT_PERSONA_JSON: JSON.stringify(config.persona || {}), DSH_DESKTOP_NODE_EXECUTABLE: process.execPath, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_DATA_HOME: join(home, '.local/share'), XDG_STATE_HOME: join(home, '.local/state'), PORT: String(this.port), AGENT_PROTOCOL: 'none', NISSE_ROUTE_C: '1', NISSE_BRIDGE_ONLY: '1', NISSE_BRIDGE_FILE: bridge },
         stdio: ['ignore', 'pipe', 'pipe'],
       })
       this.child.once('exit', (code) => { this.lastError = 'gateway exited ' + String(code ?? ''); this.child = null })

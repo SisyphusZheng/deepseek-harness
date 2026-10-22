@@ -18,7 +18,7 @@ export interface BotConfig {
   voice: { provider: string; baseUrl: string; apiKey: string; model: string; voice: string; wakeWord: string }
   llm: { provider: string; model: string; baseUrl: string; apiKey: string }
   agent: { mode: 'chat-only' | 'dsh'; workspace: string; session: string }
-  persona: { name: string; personality: string; instructions: string }
+  persona: { name: string; personality: string; tone: string; instructions: string }
   app: { autoStart: boolean; keepRunning: boolean }
 }
 
@@ -32,7 +32,7 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   voice: { provider: 'dashscope', baseUrl: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime', apiKey: '', model: 'qwen-audio-3.0-realtime-plus', voice: 'longanxiaoxin', wakeWord: '' },
   llm: { provider: 'opencode-go', model: 'deepseek-v4.1-flash', baseUrl: '', apiKey: '' },
   agent: { mode: 'dsh', workspace: '', session: '' },
-  persona: { name: 'WhaleGirlBot', personality: '自然、可靠，有一点鲸鱼娘的温柔与俏皮，但不过度卖萌；有自己的判断，不刻意迎合；做事干脆。', instructions: '事实与执行结果必须来自 DSH。' },
+  persona: { name: 'Nisse（家灵）', personality: '自然、可靠，有一点鲸鱼娘的温柔与俏皮，但不过度卖萌；有自己的判断，不刻意迎合；做事干脆。', tone: '简短、清楚、不啰嗦；必要时先给结论。', instructions: '事实与执行结果必须来自 DSH；不编造执行结果。' },
   app: { autoStart: true, keepRunning: true },
 }
 
@@ -74,6 +74,7 @@ function normalize(input: unknown): BotConfig {
     persona: {
       name: clampText(persona.name, DEFAULT_BOT_CONFIG.persona.name),
       personality: clampText(persona.personality, DEFAULT_BOT_CONFIG.persona.personality),
+      tone: clampText(persona.tone, DEFAULT_BOT_CONFIG.persona.tone),
       instructions: clampText(persona.instructions, DEFAULT_BOT_CONFIG.persona.instructions),
     },
     app: {
@@ -143,12 +144,45 @@ function page(): string {
   const catalog = providerCatalogJson()
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>Bot</title>
 <style>
-:root{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;color:#18181b;background:#fff}
-body{margin:0;padding:24px 28px;font-size:13px}h1{font-size:18px;margin:0 0 2px}.sub{color:#71717a;margin-bottom:18px}
-.tabs{display:flex;gap:6px;border-bottom:1px solid #e4e4e7;margin-bottom:18px;flex-wrap:wrap}.tab{padding:7px 12px;border-radius:8px 8px 0 0;cursor:pointer;color:#52525b}.tab.active{background:#f4f4f5;color:#09090b;font-weight:600}
-.panel{display:none}.panel.active{display:block}.row{display:flex;align-items:flex-start;gap:16px;padding:10px 0;border-bottom:1px solid #f4f4f5}.label{width:130px;color:#3f3f46;flex:none;padding-top:7px}.field{flex:1;max-width:540px}input,select,textarea{width:100%;box-sizing:border-box;padding:7px 9px;border:1px solid #d4d4d8;border-radius:7px;font:inherit;background:#fff}textarea{min-height:84px;resize:vertical}.hint{color:#a1a1aa;font-size:12px;margin-top:4px}
-.actions{margin-top:18px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}button{padding:7px 16px;border-radius:8px;border:1px solid #18181b;background:#18181b;color:#fff;cursor:pointer}button.plain{background:#fff;color:#18181b}button.test{background:#fff;color:#18181b;border-color:#d4d4d8}.status{color:#71717a}
-.test-row{display:flex;gap:10px;align-items:center;margin-top:8px;flex-wrap:wrap}.test-result{font-size:12px;color:#52525b}.test-result.ok{color:#15803d}.test-result.fail{color:#b91c1c}
+:root{
+  color-scheme:light dark;
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;
+  --fg:#18181b; --muted:#71717a; --line:#e4e4e7; --line-soft:#f4f4f5;
+  --field-bg:#ffffff; --field-border:#d4d4d8;
+  --tab:#52525b; --tab-active-bg:rgba(0,0,0,.06); --tab-active-fg:#09090b;
+  --btn-bg:#18181b; --btn-fg:#ffffff; --btn-border:#18181b; --btn-plain-fg:#18181b;
+  --hint:#a1a1aa; --ok:#15803d; --fail:#b91c1c;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --fg:#e4e4e7; --muted:#a1a1aa; --line:#3f3f46; --line-soft:rgba(255,255,255,.06);
+    --field-bg:rgba(255,255,255,.05); --field-border:#52525b;
+    --tab:#a1a1aa; --tab-active-bg:rgba(255,255,255,.10); --tab-active-fg:#fafafa;
+    --btn-bg:#fafafa; --btn-fg:#18181b; --btn-border:#fafafa; --btn-plain-fg:#e4e4e7;
+    --hint:#71717a; --ok:#4ade80; --fail:#f87171;
+  }
+}
+html,body{background:transparent;color:var(--fg)}
+body{margin:0;padding:24px 28px;font-size:13px}
+h1{font-size:18px;margin:0 0 2px}.sub{color:var(--muted);margin-bottom:18px}
+.tabs{display:flex;gap:6px;border-bottom:1px solid var(--line);margin-bottom:18px;flex-wrap:wrap}
+.tab{padding:7px 12px;border-radius:8px 8px 0 0;cursor:pointer;color:var(--tab)}
+.tab.active{background:var(--tab-active-bg);color:var(--tab-active-fg);font-weight:600}
+.panel{display:none}.panel.active{display:block}
+.row{display:flex;align-items:flex-start;gap:16px;padding:10px 0;border-bottom:1px solid var(--line-soft)}
+.label{width:130px;color:var(--muted);flex:none;padding-top:7px}
+.field{flex:1;max-width:540px}
+input,select,textarea{width:100%;box-sizing:border-box;padding:7px 9px;border:1px solid var(--field-border);border-radius:7px;font:inherit;background:var(--field-bg);color:var(--fg)}
+input::placeholder,textarea::placeholder{color:var(--hint)}
+textarea{min-height:84px;resize:vertical}
+.hint{color:var(--hint);font-size:12px;margin-top:4px}
+.actions{margin-top:18px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+button{padding:7px 16px;border-radius:8px;border:1px solid var(--btn-border);background:var(--btn-bg);color:var(--btn-fg);cursor:pointer}
+button.plain,button.test{background:transparent;color:var(--btn-plain-fg);border-color:var(--field-border)}
+.status{color:var(--muted)}
+.test-row{display:flex;gap:10px;align-items:center;margin-top:8px;flex-wrap:wrap}
+.test-result{font-size:12px;color:var(--muted)}
+.test-result.ok{color:var(--ok)}.test-result.fail{color:var(--fail)}
 .with-button{display:flex;gap:8px}.with-button input{flex:1}.with-button button{flex:none}
 </style></head><body>
 <h1>Bot</h1><div class="sub">管理语音前台、LLM 模型、后台 Agent、Bot 人格与应用程序</div>
@@ -180,6 +214,7 @@ var schema = [
   {id:'persona', label:'Bot 人格', fields:[
     {key:'name', label:'称呼', type:'text'},
     {key:'personality', label:'性格', type:'textarea'},
+    {key:'tone', label:'语气', type:'textarea'},
     {key:'instructions', label:'人格说明', type:'textarea'}
   ]},
   {id:'app', label:'应用程序', fields:[

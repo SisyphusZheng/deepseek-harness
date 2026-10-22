@@ -1,10 +1,10 @@
 import { BrandWordmark, FishLogo } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SidebarBrandMarkOwnerProps } from '@deepseek-ai/dsh-client-ui-sidebar/client'
-import whaleGirl from './whalegirl.png'
+import whaleGirl from './whalegirl-logo.webp'
 
 /** WhaleGirlBot sidebar mark (internal fan build; upstream mark replaced). */
 export function OfficialBrandMark({ size }: SidebarBrandMarkOwnerProps) {
-  return <img src={whaleGirl} alt="" width={size} height={size} style={{ borderRadius: 8, objectFit: 'cover' }} />
+  return <img src={whaleGirl} alt="" width={size} height={size} style={{ objectFit: 'contain', background: 'transparent' }} />
 }
 
 /** WhaleGirlBot wordmark. */
