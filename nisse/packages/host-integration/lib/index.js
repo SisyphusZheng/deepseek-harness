@@ -515,6 +515,7 @@ export function apply(ctx, config = {}) {
     approvalAnswerer = (req, next) => {
       try {
         const sid = req?.agent?.session?.id
+        log('approval request seen', { sid, ourSession: sessionId })
         if (!matchesSession(sid)) return next()
         const toolName = String(req?.toolName || '')
         log('approval/request', { sessionId: sid, toolName })
@@ -546,6 +547,7 @@ export function apply(ctx, config = {}) {
         return next()
       }
     }
+    ctx.on('approval/request', approvalAnswerer)
   } else {
     log('ctx.on unavailable; durable events will only be backfilled on idle')
   }
@@ -578,12 +580,7 @@ export function apply(ctx, config = {}) {
           systemPrompt.section({ name: 'nisse-persona', order: 120, text: personaText(persona), interpolate: false })
           if (digest) systemPrompt.section({ name: 'nisse-memory', order: 130, text: '长期记忆摘要：\n' + digest, interpolate: false })
         }
-        try {
-          if (typeof agentCtx?.on === 'function' && approvalAnswerer) {
-            agentCtx.on('approval/request', approvalAnswerer)
-            log('approval answerer registered in agent scope')
-          }
-        } catch (error) { log('approval answerer registration failed: ' + messageOf(error)) }
+
       } catch (error) {
         log('persona prompt section registration failed: ' + messageOf(error))
       }
