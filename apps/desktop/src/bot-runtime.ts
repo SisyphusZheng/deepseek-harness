@@ -18,10 +18,13 @@ export interface BotRuntimeConfig {
   llm?: { provider?: string; model?: string; baseUrl?: string; apiKey?: string }
   agent?: { mode?: string; workspace?: string; session?: string }
   memory?: { enabled?: boolean }
+  approval?: { mode?: string; onceMinutes?: number }
+  behavior?: { pauseOnInput?: boolean; allowScreenView?: boolean }
   persona?: {
     name?: string
     personality?: string
     tone?: string
+    promptOverride?: string
     background?: string
     quirks?: string
     addressUser?: string
@@ -103,6 +106,9 @@ function managedPatch(
     `    workspaceDir: ${JSON.stringify(workspace)}`,
     `    dshLlmEntry: ${JSON.stringify(llmEntry)}`,
     '    permissionPreset: bot-outside-write',
+    ...(String(process.env.WHALEGIRL_VOICE_PERSONA_MODULE || '').trim() === '' ? [] : [
+      `    voicePersonaModule: ${JSON.stringify(String(process.env.WHALEGIRL_VOICE_PERSONA_MODULE).trim())}`,
+    ]),
     ...(memory === null ? [] : [
       `    memoryUrl: ${JSON.stringify(memory.url)}`,
       `    memoryToken: ${JSON.stringify(memory.token)}`,
@@ -201,6 +207,10 @@ export class BotRuntime {
     const llm = existsSync(packagedLlm) ? packagedLlm : (fallbackLlm !== '' ? fallbackLlm : packagedLlm)
     process.env.NISSE_DSH_LLM_ENTRY = llm
     applyLlmEnvironment(config)
+    if (String(process.env.WHALEGIRL_VOICE_PERSONA_MODULE || '').trim() === '') {
+      const modulePath = join(this.voiceDir, 'server', 'src', 'voice', 'nisse-voice-persona.mjs')
+      if (existsSync(modulePath)) process.env.WHALEGIRL_VOICE_PERSONA_MODULE = modulePath
+    }
     const patchFile = join(profile, 'cordis.patch.yml')
     let existingPatch = ''
     try { existingPatch = readFileSync(patchFile, 'utf8') } catch {}
@@ -258,7 +268,7 @@ export class BotRuntime {
     try {
       this.child = spawn(node, ['cli/bin/qwenaudio.mjs', 'gateway'], {
         cwd: this.voiceDir,
-        env: { ...process.env, ...(apiKey ? { DASHSCOPE_API_KEY: apiKey } : {}), NISSE_BOT_PERSONA_JSON: JSON.stringify(config.persona || {}), DSH_DESKTOP_NODE_EXECUTABLE: process.execPath, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_DATA_HOME: join(home, '.local/share'), XDG_STATE_HOME: join(home, '.local/state'), PORT: String(this.port), AGENT_PROTOCOL: 'none', NISSE_ROUTE_C: '1', NISSE_BRIDGE_ONLY: '1', NISSE_BRIDGE_FILE: bridge },
+        env: { ...process.env, ...(apiKey ? { DASHSCOPE_API_KEY: apiKey } : {}), NISSE_BOT_PERSONA_JSON: JSON.stringify(config.persona || {}), NISSE_BOT_PROMPT_OVERRIDE: String(config.persona?.promptOverride || ''), DSH_DESKTOP_NODE_EXECUTABLE: process.execPath, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_DATA_HOME: join(home, '.local/share'), XDG_STATE_HOME: join(home, '.local/state'), PORT: String(this.port), AGENT_PROTOCOL: 'none', NISSE_ROUTE_C: '1', NISSE_BRIDGE_ONLY: '1', NISSE_BRIDGE_FILE: bridge },
         stdio: ['ignore', 'pipe', 'pipe'],
       })
       this.child.once('exit', (code) => { this.lastError = 'gateway exited ' + String(code ?? ''); this.child = null })

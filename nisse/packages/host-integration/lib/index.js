@@ -72,7 +72,11 @@ function normalizePersona(input) {
     instructions: pick(p.instructions, DEFAULT_PERSONA.instructions, 2000),
   }
 }
-function personaText(persona) {
+function personaText(persona, override) {
+  const custom = String(override || '').trim()
+  if (custom !== '') {
+    return custom + '\n只根据 DSH 提供的事实与执行结果说话；不虚构工具执行、文件内容或任务结果。'
+  }
   const p = persona || DEFAULT_PERSONA
   const lines = [
     '你是 Nisse（家灵），一个桌面个人 Agent。',
@@ -221,11 +225,50 @@ export function apply(ctx, config = {}) {
     const dir = configuredWorkspaceDir()
     try { mkdirSync(dir, { recursive: true }); return realpathSync(dir) } catch { return dir }
   }
+  /** Full custom persona prompt override from DSH Settings -> Bot (empty = assembled default). */
+  function personaPromptOverride() {
+    return String(readBotConfig()?.persona?.promptOverride || '').trim()
+  }
   /** The persona from DSH Settings -> Bot (name/personality/tone/instructions), falling back to the file/default. */
   function configuredPersona() {
     const configured = readBotConfig()?.persona
     return configured && typeof configured === 'object' ? normalizePersona(configured) : persona
   }
+  /** Approval behaviour from DSH Settings -> Bot -> 权限. */
+  function approvalSettings() {
+    const raw = readBotConfig()?.approval
+    const requested = String(raw?.mode || '')
+    const mode = ['ask-each', 'ask-before-acting', 'ask-once', 'never-ask'].includes(requested) ? requested : 'ask-each'
+    const minutes = Number(raw?.onceMinutes)
+    return { mode, onceMinutes: Number.isFinite(minutes) && minutes > 0 ? Math.min(minutes, 24 * 60) : 30 }
+  }
+  /** Behaviour switches from DSH Settings -> Bot -> 权限. */
+  function behaviorSettings() {
+    const raw = readBotConfig()?.behavior || {}
+    return { pauseOnInput: raw.pauseOnInput !== false, allowScreenView: raw.allowScreenView !== false }
+  }
+  const approvalStateFile = join(bridgeDir, 'approval-state.json')
+  function readApprovalState() {
+    try { const parsed = JSON.parse(readFileSync(approvalStateFile, 'utf8')); return parsed && typeof parsed === 'object' ? parsed : {} } catch { return {} }
+  }
+  function rememberAllowed() {
+    try {
+      writeFileSync(approvalStateFile, JSON.stringify({ lastAllowAt: Date.now() }, null, 2) + '\n')
+      chmodSync(approvalStateFile, 0o600)
+    } catch (error) { log('approval state persist failed: ' + messageOf(error)) }
+  }
+  /** Whether an outside-workspace mutation may run without asking right now. */
+  function approvalAutoAllows() {
+    const { mode, onceMinutes } = approvalSettings()
+    if (mode === 'never-ask') return 'never-ask'
+    if (mode === 'ask-once') {
+      const last = Number(readApprovalState().lastAllowAt)
+      if (Number.isFinite(last) && Date.now() - last < onceMinutes * 60_000) return 'ask-once'
+    }
+    return ''
+  }
+  const voicePersonaModule = String(config.voicePersonaModule || process.env.NISSE_VOICE_PERSONA_MODULE || '').trim()
+
   const botSessionFile = join(bridgeDir, 'session.json')
   /** The durable Bot conversation: one DSH session reused across launches while the Bot workspace is unchanged. */
   function readBotSession() {
@@ -302,6 +345,11 @@ export function apply(ctx, config = {}) {
       try {
         const name = String(exec?.name || '')
         const args = exec?.arguments && typeof exec.arguments === 'object' ? exec.arguments : {}
+        const behavior = behaviorSettings()
+        if (!behavior.allowScreenView && /screen|screenshot|computer|cua|visual/i.test(name)) {
+          auditEvent('tool.denied_screen_view', { tool: name })
+          return { kind: 'deny', reason: '屏幕查看已在 Bot 设置中关闭（DSH 设置 → Bot → 权限）' }
+        }
         const isWrite = writeTools.has(name)
         const isShell = /terminal|bash|shell|exec/i.test(name)
         if (!isWrite && !isShell) return next()
@@ -321,6 +369,12 @@ export function apply(ctx, config = {}) {
         const absolute = target.startsWith('~/') && home ? join(home, target.slice(2)) : resolve(target)
         const rel = relative(canonicalWorkspaceDir(), absolute)
         if (!rel.startsWith('..') && !rel.startsWith('/') && !rel.includes(':')) return next()
+        const autoAllow = approvalAutoAllows()
+        if (autoAllow !== '') {
+          auditEvent('policy.auto_allow_mode', { tool: name, target: absolute, mode: autoAllow })
+          log('approval auto-allowed by mode', { tool: name, mode: autoAllow })
+          return next()
+        }
         log('approval preflight ask', { tool: name, target: absolute })
         return { kind: 'ask', reason: `${name} outside workspace: ${absolute}`, displayReason: { en: `${name} outside workspace: ${absolute}`, zh: `${name} 写入工作区外文件：${absolute}` } }
       } catch (error) {
@@ -827,7 +881,7 @@ export function apply(ctx, config = {}) {
       try {
         const systemPrompt = agentCtx?.systemPrompt
         if (typeof systemPrompt?.section === 'function') {
-          systemPrompt.section({ name: 'nisse-persona', order: 120, text: personaText(configuredPersona()), interpolate: false })
+          systemPrompt.section({ name: 'nisse-persona', order: 120, text: personaText(configuredPersona(), personaPromptOverride()), interpolate: false })
           if (digest) systemPrompt.section({ name: 'nisse-memory', order: 130, text: '长期记忆摘要：\n' + digest, interpolate: false })
         }
 
@@ -982,6 +1036,8 @@ export function apply(ctx, config = {}) {
         lastTurn,
         conversationIndex,
         contextTokens: lastContextTokens,
+        approval: approvalSettings(),
+        behavior: behaviorSettings(),
         rotateTokenLimit: rotationTokenLimit(),
       },
       counts: { events: events.length, submitted, turns: turnCount, durableSeq, bridgeFrames: bridgeFrames.length, sseSubscribers: sseSubscribers.size },
@@ -1067,6 +1123,17 @@ export function apply(ctx, config = {}) {
         try { return json(res, 200, await memoryRequest('POST', url.pathname.slice('/memory'.length), body)) }
         catch (error) { return json(res, 503, { ok: false, error: { code: error.code || 'MEMORY_UNAVAILABLE', message: messageOf(error) } }) }
       }
+      if (url.pathname === '/persona/preview' && req.method === 'GET') {
+        const persona = configuredPersona()
+        const override = personaPromptOverride()
+        return json(res, 200, {
+          ok: true,
+          persona,
+          promptOverride: override,
+          dshPrompt: personaText(persona, override),
+          voicePersonaModule,
+        })
+      }
       if (url.pathname === '/conversation/new' && req.method === 'POST') {
         await readBody(req).catch(() => ({}))
         const rotated = await startNewConversation('manual')
@@ -1146,6 +1213,7 @@ export function apply(ctx, config = {}) {
         if (!pending) return json(res, 404, { error: 'approval not pending' })
         const outcome = requested === 'reject' ? 'rejected' : 'allowed-once'
         pending.finish(outcome)
+        if (outcome === 'allowed-once') rememberAllowed()
         push('approval.decided', { data: { id, outcome, toolName: pending.toolName } })
         auditEvent('approval.decided', { approvalId: id, outcome, toolName: pending.toolName, decision: requested })
         log('approval decision applied', { id, decision: requested, outcome })

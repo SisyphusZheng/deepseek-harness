@@ -10,7 +10,7 @@ import { BOT_CONFIG_PORT, startBotConfigServer } from './bot-config-server.ts'
 import { spawn } from 'node:child_process'
 import { BotRuntime, type BotRuntimeConfig } from './bot-runtime.ts'
 import { MemoryRuntime } from './memory-runtime.ts'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   app,
   BrowserWindow,
@@ -342,6 +342,7 @@ async function main(): Promise<void> {
     // The Body Runtime, the Hindsight spike and the memory sidecar live in the
     // product project beside the fork during development.
     process.env.WHALEGIRL_PROJECT_ROOT ||= join(repositoryRoot, '..', 'nisse')
+    process.env.WHALEGIRL_VOICE_PERSONA_MODULE ||= join(process.env.WHALEGIRL_PROJECT_ROOT, 'research', 'qwen-audio-agent', 'server', 'src', 'voice', 'nisse-voice-persona.mjs')
   }
   const botRuntime = new BotRuntime(resolveDshHome(), process.resourcesPath)
   // Built-in long-term memory: start the local Hindsight server + adapter sidecar
@@ -355,6 +356,16 @@ async function main(): Promise<void> {
     ? { url: memoryRuntime.url, token: memoryRuntime.token }
     : null)
   botRuntime.prepare(startupConfig)
+  /** Call one Host Integration bridge endpoint (loopback, bearer token from bot/bridge.json). */
+  const callBridge = async (pathName: string): Promise<Record<string, unknown> | null> => {
+    try {
+      const bridge = JSON.parse(await readFile(join(resolveDshHome(), 'bot', 'bridge.json'), 'utf8')) as { port: number; token: string }
+      const response = await net.fetch(`http://127.0.0.1:${String(bridge.port)}${pathName}`, {
+        headers: { authorization: `Bearer ${bridge.token}` },
+      })
+      return await response.json().catch(() => null) as Record<string, unknown> | null
+    } catch { return null }
+  }
   const botConfigServer = await startBotConfigServer(resolveDshHome(), undefined, {
     status: () => botRuntime.status(),
     onMemoryStatus: () => memoryRuntime.status(),
@@ -369,6 +380,37 @@ async function main(): Promise<void> {
     onMemoryForget: async () => {
       const response = await memoryRuntime.request('/forget', { filter: {}, opts: { confirm: true } })
       return response.json
+    },
+    onMemoryList: async query => (await memoryRuntime.request('/list', {
+      query: query.query ?? '',
+      limit: query.limit ?? 50,
+      offset: query.offset ?? 0,
+      ...(query.kind === undefined ? {} : { kind: query.kind }),
+      ...(query.namespace === undefined ? {} : { namespace: query.namespace }),
+    })).json,
+    onMemoryCorrect: async item => (await memoryRuntime.request('/correct', item)).json,
+    onMemoryDelete: async item => (await memoryRuntime.request('/delete', { id: item.id })).json,
+    onMemoryHistory: async query => (await memoryRuntime.request('/history', { id: query.id ?? '' })).json,
+    onPromptPreview: async (config) => {
+      const preview = await callBridge('/persona/preview') ?? {}
+      const modulePath = String(process.env.WHALEGIRL_VOICE_PERSONA_MODULE || '').trim()
+      let voicePrefix = ''
+      if (modulePath !== '') {
+        try {
+          const mod = await import(pathToFileURL(modulePath).href) as { voicePersonaPrefixFromEnv?: (env: NodeJS.ProcessEnv) => string }
+          voicePrefix = String(mod.voicePersonaPrefixFromEnv?.({
+            ...process.env,
+            NISSE_BOT_PROMPT_OVERRIDE: String(config.persona?.promptOverride || ''),
+            NISSE_BOT_PERSONA_JSON: JSON.stringify(config.persona || {}),
+          }) ?? '')
+        } catch { /* preview stays partial */ }
+      }
+      return {
+        personaPrompt: typeof preview.dshPrompt === 'string' ? preview.dshPrompt : '',
+        voicePrefix,
+        promptOverride: String(config.persona?.promptOverride || ''),
+        sources: { personaPrompt: 'host-integration /persona/preview', voicePrefix: modulePath || 'unavailable' },
+      }
     },
     onConfigSaved: (config) => {
       const previous = botRuntime.readConfig()
@@ -385,6 +427,7 @@ async function main(): Promise<void> {
           name: config.persona.name,
           personality: config.persona.personality,
           tone: config.persona.tone,
+          promptOverride: config.persona.promptOverride,
           background: config.persona.background,
           quirks: config.persona.quirks,
           addressUser: config.persona.addressUser,
@@ -467,6 +510,7 @@ async function main(): Promise<void> {
   let petProcess: ReturnType<typeof spawn> | null = null
   const startDeskPet = (config: BotRuntimeConfig): void => {
     if (petProcess) return
+    const thisConfig = config
     for (const name of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
       try { rmSync(join(petUserData, name), { force: true }) } catch {}
     }
@@ -483,6 +527,9 @@ async function main(): Promise<void> {
       NISSE_BRIDGE_FILE: join(resolveDshHome(), 'bot', 'bridge.json'),
       NISSE_SHELL_CONTROL_URL: `http://127.0.0.1:${botConfigPort}`,
       NISSE_BUBBLE_PORT: '59102',
+      NISSE_APPROVAL_MODE: String(thisConfig?.approval?.mode || 'ask-each'),
+      NISSE_PAUSE_ON_INPUT: (thisConfig?.behavior?.pauseOnInput ?? true) ? '1' : '0',
+      NISSE_ALLOW_SCREEN_VIEW: (thisConfig?.behavior?.allowScreenView ?? true) ? '1' : '0',
     }
     // A pet Electron must run as an application, never as this shell's Node child.
     delete petEnvironment.ELECTRON_RUN_AS_NODE
@@ -498,6 +545,7 @@ async function main(): Promise<void> {
         stdio: ['ignore', 'ignore', 'ignore'],
       })
       petProcess.once('exit', () => { petProcess = null })
+      petProcess.once('error', (error) => { console.warn('deskpet spawn failed:', error); petProcess = null })
       app.on('will-quit', () => { try { petProcess?.kill('SIGTERM') } catch {} })
     } catch (error) { console.warn('deskpet spawn:', error) }
   }
