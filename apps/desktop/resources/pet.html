@@ -2,12 +2,39 @@
 <style>
 html,body{margin:0;width:100%;height:100%;background:transparent;overflow:hidden;font-family:-apple-system,"PingFang SC",sans-serif}
 body{-webkit-app-region:drag;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%}
-.bubble{width:190px;background:#fff;border:2px solid #101012;border-radius:16px;padding:10px 12px;color:#141416;font-size:12px;line-height:1.5;box-shadow:0 8px 20px rgba(0,0,0,.22);position:relative;margin-bottom:6px}
+.bubble{width:190px;background:#fff;border:2px solid #101012;border-radius:16px;padding:10px 12px;color:#141416;font-size:12px;line-height:1.5;box-shadow:0 8px 20px rgba(0,0,0,.22);position:relative;margin-bottom:2px}
 .bubble:after{content:"";position:absolute;left:50%;bottom:-9px;width:12px;height:12px;background:#fff;border-right:2px solid #101012;border-bottom:2px solid #101012;transform:translateX(-50%) rotate(45deg)}
-.pet{width:132px;height:auto;user-select:none;pointer-events:auto;-webkit-app-region:no-drag}
-.hint{font-size:10px;color:#444;background:rgba(255,255,255,.85);border-radius:8px;padding:2px 6px;margin-top:4px}
+#pet{width:176px;height:108px;background-image:url("whale-girl/spritesheet.webp");background-repeat:no-repeat;background-size:1056px 1287px;image-rendering:auto;user-select:none;pointer-events:auto;-webkit-app-region:no-drag;cursor:pointer}
+.hint{font-size:10px;color:#444;background:rgba(255,255,255,.85);border-radius:8px;padding:2px 6px;margin-top:2px}
 </style></head><body>
 <div class="bubble">在的。双击我打开 WhaleGirl Bot。</div>
-<img class="pet" src="icon.png" alt="WhaleGirl Bot" title="双击打开 WhaleGirl Bot" ondblclick="window.petBridge&&window.petBridge.openMain()">
+<div id="pet" title="双击打开 WhaleGirl Bot"></div>
 <div class="hint">双击打开 · 拖动移动</div>
+<script>
+(async () => {
+  const pet = document.getElementById('pet')
+  let frames = [0,1,2,3,4,5], fps = 2, fw = 256, fh = 104
+  try {
+    const meta = await (await fetch('whale-girl/pet.json')).json()
+    const idle = meta.animations?.idle
+    if (idle?.frames?.length) { frames = idle.frames; fps = idle.fps || 2 }
+    const sheet = new Image(); sheet.src = 'whale-girl/spritesheet.webp'
+    await new Promise((resolve) => { sheet.onload = resolve; sheet.onerror = resolve })
+    if (sheet.naturalWidth) { fw = sheet.naturalWidth / 6; fh = fw * (156 / 256) }
+  } catch {}
+  pet.style.width = '176px'; pet.style.height = Math.round(176 * (fh / fw)) + 'px'
+  pet.style.backgroundSize = (6 * 176) + 'px ' + Math.round((6 * 176) * (fh / fw)) + 'px'
+  let i = 0
+  const tick = () => {
+    const index = frames[Math.floor(i / Math.max(1, Math.round(60 / fps)))] ?? frames[0]
+    const col = index % 6, row = Math.floor(index / 6)
+    pet.style.backgroundPosition = (-col * 176) + 'px ' + (-row * Math.round(176 * (fh / fw))) + 'px'
+    i = (i + 1) % (frames.length * Math.max(1, Math.round(60 / fps)))
+    requestAnimationFrame(tick)
+  }
+  tick()
+  pet.addEventListener('dblclick', () => window.petBridge?.openMain())
+  pet.addEventListener('click', (e) => { if (e.detail === 2) window.petBridge?.openMain() })
+})()
+</script>
 </body></html>
