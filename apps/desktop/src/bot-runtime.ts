@@ -39,7 +39,7 @@ export class BotRuntime {
     writeFileSync(join(profile, 'package.json'), JSON.stringify(manifest, null, 2) + '\n')
     const llm = join(this.resourcesPath, 'app.asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh-llm', 'lib', 'index.js')
     process.env.NISSE_DSH_LLM_ENTRY = llm
-    const patch = `- id: nisse-host-integration\n  name: 'nisse-host-integration'\n  config:\n    ipcDir: ${join(this.dshHome, 'nisse')}\n    workspaceDir: ${join(this.dshHome, 'workspace')}\n    dshLlmEntry: ${llm}\n`
+    const patch = `- id: nisse-host-integration\n  name: 'nisse-host-integration'\n  config:\n    provider: opencode-go\n    model: deepseek-v4.1-flash\n    reasoningEffort: low\n    ipcDir: ${join(this.dshHome, 'nisse')}\n    workspaceDir: ${join(this.dshHome, 'workspace')}\n    dshLlmEntry: ${llm}\n`
     writeFileSync(join(profile, 'cordis.patch.yml'), patch)
   }
 
@@ -75,11 +75,13 @@ export class BotRuntime {
     mkdirSync(join(this.dshHome, 'bot'), { recursive: true })
     writeFileSync(bridge, JSON.stringify({ pid: process.pid, port: descriptor.port, token: descriptor.token }, null, 2) + '\n')
     const home = join(this.dshHome, 'bot', 'voice-home')
+    let apiKey = ''
+    try { const cfg = JSON.parse(readFileSync(join(this.dshHome, 'bot', 'config.json'), 'utf8')) as { voice?: { apiKey?: string } }; apiKey = String(cfg.voice?.apiKey || '') } catch {}
     const node = process.env.WHALEGIRL_NODE || join(this.resourcesPath, 'runtime', 'bin', 'node')
     try {
       this.child = spawn(node, ['cli/bin/qwenaudio.mjs', 'gateway'], {
         cwd: this.voiceDir,
-        env: { ...process.env, DSH_DESKTOP_NODE_EXECUTABLE: process.execPath, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_DATA_HOME: join(home, '.local/share'), XDG_STATE_HOME: join(home, '.local/state'), PORT: String(this.port), AGENT_PROTOCOL: 'none', NISSE_ROUTE_C: '1', NISSE_BRIDGE_ONLY: '1', NISSE_BRIDGE_FILE: bridge },
+        env: { ...process.env, ...(apiKey ? { DASHSCOPE_API_KEY: apiKey } : {}), DSH_DESKTOP_NODE_EXECUTABLE: process.execPath, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_DATA_HOME: join(home, '.local/share'), XDG_STATE_HOME: join(home, '.local/state'), PORT: String(this.port), AGENT_PROTOCOL: 'none', NISSE_ROUTE_C: '1', NISSE_BRIDGE_ONLY: '1', NISSE_BRIDGE_FILE: bridge },
         stdio: ['ignore', 'pipe', 'pipe'],
       })
       this.child.once('exit', (code) => { this.lastError = 'gateway exited ' + String(code ?? ''); this.child = null })
