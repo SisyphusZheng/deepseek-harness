@@ -71,5 +71,8 @@ export interface WelcomeAuthentication {
  * @returns true only when neither authentication route is configured.
  */
 export function needsWelcome(authentication: WelcomeAuthentication): boolean {
+  // 鲸鱼娘bot internal fan build: local-first BYOK, no account/login gate.
+  // Set WHALE_BOT_LOCAL_ONLY=0 to restore upstream welcome behavior for debugging.
+  if ((process.env as Record<string, string | undefined>).WHALE_BOT_LOCAL_ONLY !== '0') return false
   return !authentication.loggedIn && !authentication.hasApiKey
 }

@@ -389,6 +389,22 @@ async function main(): Promise<void> {
       detail: formatDesktopMessage(locale.messages.aboutVersion, { version: app.getVersion() }),
       buttons: [locale.messages.updateAcknowledge], cancelId: 0 })
   }
+  let licensesWindow: BrowserWindow | undefined
+  const openLicensesWindow = (): void => {
+    if (licensesWindow !== undefined && !licensesWindow.isDestroyed()) { licensesWindow.show(); licensesWindow.focus(); return }
+    const licensesOptions: Electron.BrowserWindowConstructorOptions = {
+      width: 760, height: 720, title: currentDesktopLocale().messages.licensesTitle,
+      modal: false, show: true,
+      webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
+    }
+    if (mainWindow !== undefined && !mainWindow.isDestroyed()) licensesOptions.parent = mainWindow
+    licensesWindow = new BrowserWindow(licensesOptions)
+    const licensesPath = app.isPackaged
+      ? join(process.resourcesPath, 'licenses.html')
+      : fileURLToPath(new URL('../resources/licenses.html', import.meta.url))
+    void licensesWindow.loadFile(licensesPath)
+    licensesWindow.once('closed', () => { licensesWindow = undefined })
+  }
   const commandManager = new DesktopCommandManager({
     resources: process.resourcesPath,
     isPackaged: app.isPackaged,
@@ -958,6 +974,7 @@ async function main(): Promise<void> {
       ? { label: currentDesktopLocale().messages.aboutMenu,
         click: () => { void showAbout().catch((error: unknown) => { console.error(error) }) } }
       : { label: currentDesktopLocale().messages.aboutMenu, role: 'about' },
+    { label: currentDesktopLocale().messages.licensesMenu, click: () => openLicensesWindow() },
     { type: 'separator' },
     { label: currentDesktopLocale().messages.checkUpdatesMenu, click: () => { void openUpdatePrompt(true) } },
     ...process.platform === 'darwin' || process.platform === 'win32'
