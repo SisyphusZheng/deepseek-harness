@@ -577,7 +577,7 @@ export function apply(ctx, config = {}) {
         push('user.message', { ...base, data: { durableSeq: event.seq, text: contentText(data.content) } })
         break
       case 'assistant/message':
-        push('assistant.message', { ...base, data: { durableSeq: event.seq } })
+        push('assistant.message', { ...base, data: { durableSeq: event.seq, text: contentText(data.content) } })
         break
       case 'approval/asked':
         // The approval/request handler pushes a richer approval.request event
