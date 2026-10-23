@@ -1,5 +1,5 @@
 /** Supervises the optional voice gateway child owned by the WhaleGirlBot desktop shell. */
-import { spawn, type ChildProcess } from 'node:child_process'
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -253,6 +253,31 @@ export class BotRuntime {
     }
   }
 
+  /**
+   * Stop a gateway left behind by a crashed/killed previous shell. The qwen
+   * gateway keeps a per-profile lease, so a stale instance would make the new
+   * child exit immediately (code 0) while the voice service still looks down.
+   */
+  private stopStaleGateway(): void {
+    try {
+      const output = execFileSync('/usr/sbin/lsof', ['-nP', `-iTCP:${String(this.port)}`, '-sTCP:LISTEN', '-t'], { encoding: 'utf8' })
+      for (const raw of output.split(/\s+/)) {
+        const pid = Number(raw)
+        if (!Number.isInteger(pid) || pid <= 0) continue
+        try {
+          const command = execFileSync('/bin/ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' })
+          if (!/qwenaudio\.mjs/.test(command)) continue
+          process.kill(pid, 'SIGTERM')
+          console.warn('bot runtime: stopped stale voice gateway pid', pid)
+        } catch { /* process already gone */ }
+      }
+      const deadline = Date.now() + 3_000
+      while (Date.now() < deadline) {
+        try { execFileSync('/usr/sbin/lsof', ['-nP', `-iTCP:${String(this.port)}`, '-sTCP:LISTEN', '-t'], { stdio: 'pipe' }) } catch { return }
+      }
+    } catch { /* nothing listening */ }
+  }
+
   async start(): Promise<BotRuntimeStatus> {
     if (this.child) return this.status()
     if (!existsSync(this.entry)) { this.lastError = 'voice runtime not bundled'; return this.status() }
@@ -261,6 +286,7 @@ export class BotRuntime {
     const bridge = this.bridgeFile()
     mkdirSync(join(this.dshHome, 'bot'), { recursive: true })
     writeFileSync(bridge, JSON.stringify({ pid: process.pid, port: descriptor.port, token: descriptor.token }, null, 2) + '\n')
+    this.stopStaleGateway()
     const home = join(this.dshHome, 'bot', 'voice-home')
     const config = this.readConfig()
     const apiKey = String(config.voice?.apiKey || '')

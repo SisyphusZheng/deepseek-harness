@@ -518,6 +518,16 @@ export function apply(ctx, config = {}) {
 
   const matchesSession = (id) => Boolean(sessionId) && String(id || '') === sessionId
 
+  /** Model-visible text of one message content array (bounded for the bridge UI). */
+  function contentText(content) {
+    if (!Array.isArray(content)) return ''
+    return content
+      .filter(part => part && part.type === 'text' && typeof part.text === 'string')
+      .map(part => part.text)
+      .join('\n')
+      .slice(0, 500)
+  }
+
   function recordDurable(session, event) {
     if (!event || typeof event.type !== 'string') return
     const sid = session?.id
@@ -564,7 +574,7 @@ export function apply(ctx, config = {}) {
         push('tool.result', { ...base, data: { durableSeq: event.seq, ...summarizeToolData(data) } })
         break
       case 'user/message':
-        push('user.message', { ...base, data: { durableSeq: event.seq } })
+        push('user.message', { ...base, data: { durableSeq: event.seq, text: contentText(data.content) } })
         break
       case 'assistant/message':
         push('assistant.message', { ...base, data: { durableSeq: event.seq } })
